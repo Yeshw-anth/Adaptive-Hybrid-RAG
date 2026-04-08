@@ -1,0 +1,25 @@
+# IDE configuration
+.idea/
+.vscode/
+.venv
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Environment variables
+.env
+
+# Local data and uploads
+storage/
+uploaded_files/
+image_cache/
+logs/
+treesitter_build/tree-sitter-grammars/
+
+# Operating System files
+.DS_Store
+Thumbs.db
