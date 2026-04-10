@@ -51,7 +51,7 @@ EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 EMBEDDING_DIM = 384
 DEFAULT_LLM_MODEL = "phi3"
 SMALL_LLM_MODEL = "phi3"
-LARGE_LLM_MODEL = "llama3"
+LARGE_LLM_MODEL = "phi3"
 
 # --- Vector Store Settings ---
 # Directory to persist the FAISS vector store index.

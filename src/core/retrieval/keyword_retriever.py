@@ -1,7 +1,7 @@
 import logging
 from typing import List, Dict, Any
 from rank_bm25 import BM25Okapi
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import TextNode, NodeWithScore
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class KeywordRetriever:
             self.bm25 = BM25Okapi(self.tokenized_corpus)
             logger.info(f"KeywordRetriever re-initialized with {len(nodes)} nodes.")
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def retrieve(self, query: str, top_k: int = 5) -> List[NodeWithScore]:
         """
         Retrieves the top_k most relevant documents for a given query
         using BM25.
@@ -53,15 +53,10 @@ class KeywordRetriever:
         # Get the top_k indices and scores
         top_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
         
-        retrieved_docs = []
+        retrieved_nodes = []
         for i in top_indices:
             node = self.nodes[i]
-            retrieved_docs.append({
-                "id": node.id_,
-                "text": node.get_content(),
-                "metadata": node.metadata,
-                "score": doc_scores[i]
-            })
+            retrieved_nodes.append(NodeWithScore(node=node, score=doc_scores[i]))
         
-        logger.info(f"Retrieved {len(retrieved_docs)} documents using keyword search.")
-        return retrieved_docs
+        logger.info(f"Retrieved {len(retrieved_nodes)} documents using keyword search.")
+        return retrieved_nodes

@@ -4,7 +4,7 @@ import logging
 import json
 from typing import Dict, Any, List, Optional
 
-from src.data.schemas import Document
+from src.data.schemas import Document, QueryMetadata, Strategy
 from src.core.pipelines.base import Pipeline
 from src.core.retrieval.retriever import Retriever
 from src.core.retrieval.hybrid_retriever import HybridRetriever
@@ -18,9 +18,6 @@ from src.config import settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-from src.data.schemas import Document
 
 class AccuratePipeline(Pipeline):
     """
@@ -42,122 +39,123 @@ class AccuratePipeline(Pipeline):
         start_time = time.time()
         logging.info(f"--- Running AccuratePipeline for query: '{query}' ---")
 
-        # Determine chunking strategy from query analysis or default to semantic
-        chunking_strategy = query_analysis.get('strategy', {}).get('chunking_strategy', 'semantic')
+        strategy: Strategy = query_analysis['strategy']
+        query_metadata: QueryMetadata = query_analysis['metadata']
+        chunking_strategy = strategy.chunking_strategy if hasattr(strategy, 'chunking_strategy') else 'semantic'
         logging.info(f"Using chunking strategy: {chunking_strategy}")
 
-        # 1. Analyze query for potential section filters
         logging.info("Step 1: Analyzing query for section filters...")
-
         filters = None
 
-        # 2. Initial Retrieval with potential filters
         logging.info("Step 2: Performing initial retrieval...")
-        retrieval_result = self._retrieve_docs(query, query_analysis['strategy'], filters=filters)
+        retrieval_result = self._retrieve_docs(query, strategy, filters=filters)
+        initial_nodes = retrieval_result["docs"]
 
-        # Fallback to broad search if filtered search yields no results
-        if not retrieval_result["docs"] and filters:
+        if not initial_nodes and filters:
             logging.warning("Filtered retrieval yielded no results. Falling back to broad retrieval.")
-            retrieval_result = self._retrieve_docs(query, query_analysis['strategy'], filters=None)
+            retrieval_result = self._retrieve_docs(query, strategy, filters=None)
+            initial_nodes = retrieval_result["docs"]
 
-        if not retrieval_result["docs"]:
+        if not initial_nodes:
             logging.warning("No documents found during initial retrieval.")
-            return self._format_empty_response(query, start_time, query_analysis)
-        logging.info(f"Step 2: Retrieved {len(retrieval_result['docs'])} documents.")
+            return self._format_empty_response(query, start_time, strategy, query_metadata)
+        logging.info(f"Step 2: Retrieved {len(initial_nodes)} documents.")
 
-        # 3. Rerank the initial documents
         logging.info("Step 3: Reranking retrieved documents...")
-        rerank_result = self._rerank_docs(query, retrieval_result["docs"], query_analysis['strategy'])
-        if rerank_result["docs"]:
-            logging.info(f"Step 3: Reranking complete. Top document score: {rerank_result['docs'][0]['score']}")
+        rerank_result = self._rerank_docs(query, initial_nodes, strategy)
+        reranked_nodes = rerank_result["docs"]
+        if reranked_nodes:
+            logging.info(f"Step 3: Reranking complete. Top document score: {reranked_nodes[0].score}")
         else:
             logging.warning("Reranking returned no documents.")
 
-        # 4. Decide action and potentially expand
         logging.info("Step 4: Making decision on action (expand, generate, or abstain)...")
         decision_result = await self._decide_and_expand(
-            query, query_analysis, retrieval_result["docs"], rerank_result["docs"], initial_filters=filters
+            query, strategy, query_metadata, initial_nodes, reranked_nodes, initial_filters=filters
         )
 
         action = decision_result["action"]
         if action == "abstain":
-            return self._format_abstain_response(decision_result, start_time, query_analysis)
+            return self._format_abstain_response(decision_result, start_time, strategy, query_metadata)
 
-        # 5. Generate the final answer using the final set of documents
-        final_docs = decision_result["final_docs"]
+        final_nodes = decision_result["final_docs"]
+        final_docs_for_context = final_nodes
 
-        # 5a. Fetch parent documents if the strategy requires it
-        if query_analysis['strategy'].get('use_parent_child', False):
+        if strategy.use_parent_child:
             logging.info("Step 5a: Strategy requires parent-child retrieval. Fetching parent documents.")
-            final_docs = self._fetch_and_add_parents(final_docs)
+            final_docs_for_context = self._fetch_and_add_parents(final_nodes)
 
-        context = self._construct_context(final_docs)
+        # Convert to dicts for the final stages
+        final_docs_as_dicts = self._format_nodes_to_docs(final_docs_for_context)
+        context = self._construct_context(final_docs_as_dicts)
         logging.info(f"CONTEXT_SENT_TO_LLM: {context}")
 
-        # 6. Generate full response
         try:
-            answer = await self.llm_client.generate_response(context, query, query_analysis['strategy'].get('model', settings.DEFAULT_LLM_MODEL))
+            answer = await self.llm_client.generate_response(context, query, strategy.model)
         except Exception as e:
             logging.error(f"Error during LLM generation in AccuratePipeline: {e}")
-            return self._format_error_response(str(e), start_time, query_analysis)
+            return self._format_error_response(str(e), start_time, strategy, query_metadata)
 
-        # 7. Format the final response
         response = self._format_response(
             answer=answer,
-            sources=self._format_sources(final_docs),
-            retrieved_docs=retrieval_result["docs"],
-            reranked_docs=rerank_result["docs"],
-            final_docs=final_docs,
+            sources=self._format_sources(final_docs_as_dicts),
+            retrieved_docs=self._format_nodes_to_docs(initial_nodes),
+            reranked_docs=self._format_nodes_to_docs(reranked_nodes if reranked_nodes else []),
+            final_docs=final_docs_as_dicts,
             context=context,
             latency=time.time() - start_time,
-            query_metadata=query_analysis['metadata'],
-            strategy=query_analysis['strategy'],
+            query_metadata=query_metadata,
+            strategy=strategy,
             pipeline="accurate",
             confidence=decision_result["confidence"],
             action_taken=action,
             expansion_details=decision_result["expansion_details"],
-            confidence_before_expansion=decision_result.get("confidence_before_expansion", 0.0)
+            confidence_before_expansion=decision_result.get("confidence_before_expansion", {}).get("final_score", 0.0)
         )
         logging.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2)}")
         return response
 
-    def _fetch_and_add_parents(self, child_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _fetch_and_add_parents(self, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
         """
-        Fetches parent documents for a list of child documents and merges them.
-        Now works with lists of dictionaries.
+        Fetches parent documents for a list of nodes and merges them.
+        Returns a list of NodeWithScore objects.
         """
-        parent_ids_to_fetch = set()
-        for doc in child_docs:
-            if doc.get("metadata") and doc["metadata"].get("parent_id"):
-                parent_ids_to_fetch.add(doc["metadata"]["parent_id"])
+        if not self.retriever or not hasattr(self.retriever, 'vector_store'):
+            logger.warning("Retriever or vector_store not available. Skipping parent fetch.")
+            return nodes
 
-        if not parent_ids_to_fetch:
-            logging.info("No parent documents to fetch.")
-            return child_docs
+        parent_ids = set()
+        for node in nodes:
+            parent_id = node.metadata.get("parent_id")
+            if parent_id:
+                parent_ids.add(parent_id)
+        
+        if not parent_ids:
+            logger.info("No parent IDs found in the retrieved nodes.")
+            return nodes
 
-        logging.info(f"Fetching {len(parent_ids_to_fetch)} parent documents.")
+        logger.info(f"Fetching {len(parent_ids)} parent documents.")
+        
+        # Retrieve parent nodes from the docstore
+        # LlamaIndex get_nodes returns a Dict[str, BaseNode]
+        parent_nodes_dict = self.retriever.vector_store.get_nodes(list(parent_ids))
+        
+        # Create NodeWithScore objects for the parents. Assign a neutral score.
+        parent_node_with_scores = [
+            NodeWithScore(node=parent_node, score=0.0) for parent_node in parent_nodes_dict.values()
+        ]
+        
+        logger.info(f"Successfully fetched {len(parent_node_with_scores)} parent nodes.")
 
-        parent_nodes = []
-        for parent_id in parent_ids_to_fetch:
-            retrieved = self.retriever.retrieve(query="", top_k=1, filters={"chunk_id": parent_id})
-            if retrieved:
-                parent_nodes.extend(retrieved)
-
-        # Convert parent nodes to the standardized dictionary format
-        parent_docs_as_dicts = self._format_nodes_to_docs(parent_nodes)
-
-        logging.info(f"Successfully fetched {len(parent_docs_as_dicts)} parent documents.")
-
-        # Merge and deduplicate child and parent documents
-        combined_docs = self._merge_and_deduplicate(child_docs + parent_docs_as_dicts)
-
-        return combined_docs
+        # Merge original nodes with parent nodes, preserving order and prioritizing original nodes
+        combined_nodes = self._merge_and_deduplicate(nodes + parent_node_with_scores)
+        return combined_nodes
 
 
-    def _retrieve_docs(self, query: str, strategy: Dict[str, Any], filters: Dict[str, str] = None) -> Dict:
+    def _retrieve_docs(self, query: str, strategy: "Strategy", filters: Dict[str, str] = None) -> Dict:
         retrieval_start = time.time()
-        retrieval_strategy = strategy.get("retrieval_strategy", "vector")
-        depth = strategy.get("top_k", settings.RETRIEVER_TOP_K)
+        retrieval_strategy = strategy.retrieval_strategy
+        depth = strategy.top_k
 
         if retrieval_strategy == 'hybrid':
             retrieved_nodes = self.hybrid_retriever.retrieve(query, top_k=depth, filters=filters)
@@ -167,65 +165,43 @@ class AccuratePipeline(Pipeline):
         else:
             retrieved_nodes = self.retriever.retrieve(query, top_k=depth, filters=filters)
 
-        docs_as_objects = self._format_nodes_to_docs(retrieved_nodes)
-
         retrieval_time = time.time() - retrieval_start
-        serializable_docs = [
-            {"text": doc.get("text"), "metadata": doc.get("metadata"), "score": doc.get("score")}
-            for doc in docs_as_objects
-        ]
-        logging.info(f"RETRIEVED_CHUNKS: {json.dumps(serializable_docs, indent=2)}")
         logging.info(
-            f"Retrieval time: {retrieval_time:.4f}s, Candidates: {len(docs_as_objects)}, Strategy: {retrieval_strategy}")
-        return {"docs": docs_as_objects, "time": retrieval_time}
+            f"Retrieval time: {retrieval_time:.4f}s, Candidates: {len(retrieved_nodes)}, Strategy: {retrieval_strategy}")
+        return {"docs": retrieved_nodes, "time": retrieval_time}
 
-    def _rerank_docs(self, query: str, docs: List[Dict[str, Any]], strategy: Dict[str, Any]) -> Dict:
-        if not strategy.get("use_reranker") or not docs:
+    def _rerank_docs(self, query: str, docs: List[NodeWithScore], strategy: "Strategy") -> Dict:
+        if not strategy.use_reranker or not docs:
             return {"docs": docs, "time": 0}
 
         rerank_start = time.time()
 
-        # Convert dicts back to NodeWithScore objects for the reranker
-        nodes_to_rerank = [
-            NodeWithScore(
-                node=TextNode(text=doc.get("text", ""), metadata=doc.get("metadata", {})),
-                score=doc.get("score")
-            )
-            for doc in docs
-        ]
-
-        reranked_nodes = self.reranker.rerank_nodes(query, nodes_to_rerank)
+        # Rerank the nodes
+        reranked_nodes = self.reranker.rerank_nodes(query, docs)
 
         # Truncate the results to the top N after reranking
-        top_n = strategy.get("reranker_top_n", settings.RERANKER_TOP_N)
+        top_n = strategy.reranker_top_n if hasattr(strategy, 'reranker_top_n') else settings.RERANKER_TOP_N
         reranked_nodes = reranked_nodes[:top_n]
-
-        # Convert reranked nodes back to the standardized dictionary format
-        reranked_docs = self._format_nodes_to_docs(reranked_nodes)
 
         rerank_time = time.time() - rerank_start
         logging.info(f"Rerank time: {rerank_time:.4f}s")
-        return {"docs": reranked_docs, "time": rerank_time}
+        return {"docs": reranked_nodes, "time": rerank_time}
 
-    async def _decide_and_expand(self, query: str, query_analysis: Dict, initial_docs: List[Dict[str, Any]],
-                           reranked_docs: Optional[List[Dict[str, Any]]], initial_filters: Dict = None) -> Dict:
-        strategy = query_analysis['strategy']
-        query_metadata = query_analysis['metadata']
-        docs_for_confidence = reranked_docs if reranked_docs is not None and strategy.get("use_reranker") else initial_docs
+    async def _decide_and_expand(self, query: str, strategy: Strategy, query_metadata: QueryMetadata, initial_nodes: List[NodeWithScore],
+                               reranked_nodes: Optional[List[NodeWithScore]], initial_filters: Dict = None) -> Dict:
+        
+        docs_for_confidence = reranked_nodes if reranked_nodes is not None and strategy.use_reranker else initial_nodes
 
-        # First, calculate context confidence
         context_confidence = self.confidence_engine.calculate_context_confidence(
             query_metadata=query_metadata,
-            retrieved_docs=initial_docs,
-            reranked_docs=reranked_docs
+            retrieved_docs=initial_nodes,
+            reranked_docs=reranked_nodes
         )
-
-        # Decide initial action based on context
         action = self.confidence_engine.decide_action_from_context(context_confidence)
 
-        final_docs = docs_for_confidence
+        final_nodes = docs_for_confidence
         expansion_details = {"expanded": False, "queries": [query], "retrieval_time": 0}
-        confidence_before_expansion = context_confidence.get("context_score", 0.0)
+        confidence_before_expansion = context_confidence
 
         if action == "expand":
             logging.info("Executing 'expand' action: Expanding query and re-retrieving.")
@@ -235,48 +211,64 @@ class AccuratePipeline(Pipeline):
             expansion_details["queries"] = expanded_queries
 
             expand_retrieval_start = time.time()
-            all_expanded_docs = []
+            all_expanded_nodes = []
             for eq in expanded_queries:
                 if eq != query:
                     retrieval_result = self._retrieve_docs(eq, strategy, filters=initial_filters)
-                    all_expanded_docs.extend(retrieval_result["docs"])
+                    all_expanded_nodes.extend(retrieval_result["docs"])
             expansion_details["retrieval_time"] = time.time() - expand_retrieval_start
 
-            merged_docs = self._merge_and_deduplicate(initial_docs + all_expanded_docs)
+            merged_nodes = self._merge_and_deduplicate(initial_nodes + all_expanded_nodes)
 
-            if strategy.get("use_reranker"):
-                final_rerank_result = self._rerank_docs(query, merged_docs, strategy)
-                final_docs = final_rerank_result["docs"]
+            if strategy.use_reranker:
+                final_rerank_result = self._rerank_docs(query, merged_nodes, strategy)
+                final_nodes = final_rerank_result["docs"]
             else:
-                final_docs = merged_docs
+                final_nodes = merged_nodes
 
-            # After expansion, re-evaluate context confidence and make a new decision (no more expansion)
+            # Re-evaluate confidence post-expansion
             context_confidence = self.confidence_engine.calculate_context_confidence(
                 query_metadata=query_metadata,
-                retrieved_docs=merged_docs,
-                reranked_docs=final_docs
+                retrieved_docs=merged_nodes,
+                reranked_docs=final_nodes
             )
             action = self.confidence_engine.decide_action_from_context(context_confidence, is_post_expansion=True)
             logger.info(f"Post-expansion action decided: '{action}'")
 
         return {
             "action": action,
-            "final_docs": final_docs,
-            "confidence": context_confidence, # Pass the final context confidence
+            "final_docs": final_nodes,
+            "confidence": context_confidence,
             "expansion_details": expansion_details,
             "confidence_before_expansion": confidence_before_expansion
         }
 
-    def _merge_and_deduplicate(self, docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        unique_docs = {}
-        for doc in docs:
-            # Use a unique identifier from metadata if available, otherwise use text
-            unique_id = doc.get("metadata", {}).get("chunk_id") or doc.get("text")
-            if unique_id and unique_id not in unique_docs:
-                unique_docs[unique_id] = doc
+    def _merge_and_deduplicate(self, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+        """Merges and deduplicates a list of NodeWithScore objects based on node ID."""
+        unique_nodes = {}
+        for node in nodes:
+            if node.node.id_ not in unique_nodes:
+                unique_nodes[node.node.id_] = node
+        
+        logging.info(f"Merged and deduplicated docs down to {len(unique_nodes)} unique docs.")
+        return list(unique_nodes.values())
 
-        logging.info(f"Merged and deduplicated docs down to {len(unique_docs)} unique docs.")
-        return list(unique_docs.values())
+    def _format_nodes_to_docs(self, nodes: Optional[List[NodeWithScore]]) -> List[Dict[str, Any]]:
+        """Converts a list of NodeWithScore to a list of standardized dictionaries."""
+        if not nodes:
+            return []
+        
+        formatted_docs = []
+        for node in nodes:
+            doc = {
+                "id": node.node.id_, # Capture the node's unique ID
+                "text": node.get_text(),
+                "metadata": node.metadata or {},
+                "score": node.score,
+                "file_path": node.metadata.get("file_path", "Unknown") # Capture the file path
+            }
+            formatted_docs.append(doc)
+        return formatted_docs
 
     def _construct_context(self, docs: List[Dict[str, Any]]) -> str:
         context_parts = []
@@ -311,20 +303,17 @@ class AccuratePipeline(Pipeline):
     def _format_sources(self, docs: List[Dict[str, Any]]) -> List[Dict]:
         sources = []
         for doc in docs:
-            metadata = doc.get("metadata", {})
             source_item = {
-                "file": metadata.get("file_name", "Unknown"),
-                "chunk_id": metadata.get("chunk_id", "Unknown"),
+                "file": doc.get("file_path", "Unknown"),
+                "chunk_id": doc.get("id", "Unknown"),
             }
             if "score" in doc and doc["score"] is not None:
                 source_item["vector_score"] = float(doc["score"])
 
-            # The reranker now updates the score in place.
-            # We can add a rank if needed.
             sources.append(source_item)
         return sources
 
-    def _format_empty_response(self, query: str, start_time: float, query_analysis: Dict) -> Dict[str, Any]:
+    def _format_empty_response(self, query: str, start_time: float, strategy: Strategy, query_metadata: QueryMetadata) -> Dict[str, Any]:
         return {
             "answer": "Could not find any relevant information.",
             "sources": [],
@@ -333,12 +322,12 @@ class AccuratePipeline(Pipeline):
             "final_docs": [],
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_analysis.get('metadata', {}),
-            "strategy": query_analysis.get('strategy', {}),
+            "query_metadata": query_metadata.dict(),
+            "strategy": strategy.dict(),
             "pipeline": "accurate",
         }
 
-    def _format_abstain_response(self, decision_result: Dict, start_time: float, query_analysis: Dict) -> Dict[str, Any]:
+    def _format_abstain_response(self, decision_result: Dict, start_time: float, strategy: Strategy, query_metadata: QueryMetadata) -> Dict[str, Any]:
         return {
             "answer": "Abstained from answering due to low confidence.",
             "sources": self._format_sources(decision_result.get("final_docs", [])),
@@ -347,8 +336,8 @@ class AccuratePipeline(Pipeline):
             "final_docs": decision_result.get("final_docs", []),
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_analysis.get('metadata', {}),
-            "strategy": query_analysis.get('strategy', {}),
+            "query_metadata": query_metadata.dict(),
+            "strategy": strategy.dict(),
             "pipeline": "accurate",
             "confidence": decision_result["confidence"],
             "action_taken": "abstain"
@@ -362,7 +351,8 @@ class AccuratePipeline(Pipeline):
 
         confidence = kwargs.get("confidence", {})
         confidence_score = confidence.get("context_score") if isinstance(confidence, dict) else None
-        query_metadata = kwargs.get("query_metadata", {})
+        query_metadata: Optional[QueryMetadata] = kwargs.get("query_metadata")
+        strategy: Optional[Strategy] = kwargs.get("strategy")
 
         return {
             "answer": kwargs.get("answer"),
@@ -372,15 +362,15 @@ class AccuratePipeline(Pipeline):
             "final_docs": kwargs.get("final_docs", []),
             "context": kwargs.get("context", ""),
             "latency": kwargs.get("latency"),
-            "query_metadata": query_metadata,
-            "strategy": kwargs.get("strategy", {}),
-            "query_type": query_metadata.get("query_type", "unknown"), # For convenience
+            "query_metadata": query_metadata.dict() if query_metadata else {},
+            "strategy": strategy.dict() if strategy else {},
+            "query_type": query_metadata.query_type if query_metadata else "unknown", # For convenience
             "pipeline": kwargs.get("pipeline"),
             "confidence_score": confidence_score,
             "expansion_details": expansion_details
         }
 
-    def _format_error_response(self, error_message: str, start_time: float, query_analysis: Dict) -> Dict[str, Any]:
+    def _format_error_response(self, error_message: str, start_time: float, strategy: Strategy, query_metadata: QueryMetadata) -> Dict[str, Any]:
         return {
             "answer": f"An error occurred: {error_message}",
             "sources": [],
@@ -389,7 +379,7 @@ class AccuratePipeline(Pipeline):
             "final_docs": [],
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_analysis.get('metadata', {}),
-            "strategy": query_analysis.get('strategy', {}),
+            "query_metadata": query_metadata.dict(),
+            "strategy": strategy.dict(),
             "pipeline": "accurate",
         }

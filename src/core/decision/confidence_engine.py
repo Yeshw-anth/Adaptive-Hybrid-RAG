@@ -3,6 +3,7 @@ import numpy as np
 import logging
 import json
 from pydantic import BaseModel, Field
+from llama_index.core.schema import NodeWithScore
 from src.core.llm.ollama_client import OllamaClient
 from src.config import settings
 
@@ -43,41 +44,61 @@ class ConfidenceEngine:
         Respond with ONLY the JSON object.
         """
 
-    def calculate_context_confidence(self, query_metadata: Dict[str, Any], retrieved_docs: List[Dict], reranked_docs: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """Calculates a confidence score based on the quality of the retrieved context."""
-        # ... (previous logic for relevance, reranker, coverage, consistency)
-        # This logic remains the same as before.
-        docs_for_retrieval_score = retrieved_docs
-        docs_for_rerank_score = reranked_docs
-
-        if not docs_for_retrieval_score and not docs_for_rerank_score:
+    def calculate_context_confidence(self, query_metadata: Dict[str, Any], retrieved_docs: List[NodeWithScore], reranked_docs: Optional[List[NodeWithScore]] = None) -> Dict[str, Any]:
+        """
+        Calculates a confidence score based on the quality of the retrieved context.
+        This version is updated to handle NodeWithScore objects and use normalized scores.
+        """
+        if not retrieved_docs and not reranked_docs:
             return self._format_result(0, "low", "No documents found", {})
 
-        vector_scores = [doc.get('score', 100) for doc in docs_for_retrieval_score if doc.get('score') is not None]
-        relevance_scores = [np.exp(-0.1 * s) for s in vector_scores]
-        relevance_score_avg = np.mean(relevance_scores) if relevance_scores else 0.0
+        # --- Score Normalization ---
+        # Use a sigmoid function to map scores to a (0, 1) range.
+        # This handles both positive vector scores and pos/neg reranker scores gracefully.
+        def _normalize_score(score: float) -> float:
+            if score is None:
+                return 0.0
+            return 1 / (1 + np.exp(-score))
 
-        reranker_scores = [doc.get('score', 0.0) for doc in docs_for_rerank_score if doc.get('score') is not None] if docs_for_rerank_score else []
-        reranker_score_avg = np.mean(reranker_scores) if reranker_scores else 0.0
+        # --- Relevance Score (from initial retrieval) ---
+        vector_scores_raw = [doc.score for doc in retrieved_docs if doc.score is not None]
+        relevance_scores_normalized = [_normalize_score(s) for s in vector_scores_raw]
+        relevance_score_avg = np.mean(relevance_scores_normalized) if relevance_scores_normalized else 0.0
+
+        # --- Reranker Score ---
+        reranker_scores_normalized = []
+        if reranked_docs:
+            reranker_scores_raw = [doc.score for doc in reranked_docs if doc.score is not None]
+            reranker_scores_normalized = [_normalize_score(s) for s in reranker_scores_raw]
         
+        reranker_score_avg = np.mean(reranker_scores_normalized) if reranker_scores_normalized else 0.0
+
+        # --- Coverage and Consistency ---
         num_docs = len(reranked_docs) if reranked_docs is not None else len(retrieved_docs)
-        coverage_score = min(num_docs / 5.0, 1.0)
+        coverage_score = min(num_docs / 5.0, 1.0) # Simple metric: score increases up to 5 docs
 
-        score_std_dev = np.std(reranker_scores if reranker_scores else relevance_scores)
-        consistency_score = 1 - min(score_std_dev, 1.0)
+        # Consistency is the standard deviation of the *normalized* scores.
+        # A lower std dev means scores are similar, suggesting higher consistency.
+        scores_for_consistency = reranker_scores_normalized if reranked_docs else relevance_scores_normalized
+        score_std_dev = np.std(scores_for_consistency) if scores_for_consistency else 0.0
+        consistency_score = 1 - score_std_dev
 
-        if reranker_scores:
+        # --- Final Weighted Score ---
+        if reranked_docs:
+            # Give more weight to the reranker's assessment
             weights = {"reranker": 0.6, "relevance": 0.1, "coverage": 0.2, "consistency": 0.1}
             context_score = (weights["reranker"] * reranker_score_avg +
                              weights["relevance"] * relevance_score_avg +
                              weights["coverage"] * coverage_score +
                              weights["consistency"] * consistency_score)
         else:
+            # Without a reranker, rely more on initial relevance
             weights = {"relevance": 0.7, "coverage": 0.2, "consistency": 0.1}
             context_score = (weights["relevance"] * relevance_score_avg +
                              weights["coverage"] * coverage_score +
                              weights["consistency"] * consistency_score)
 
+        # Clamp the final score to be within [0, 1]
         context_score = max(0, min(1, context_score))
 
         details = {
@@ -91,9 +112,9 @@ class ConfidenceEngine:
         
         return {"context_score": context_score, "details": details}
 
-    async def verify_groundedness(self, answer: str, context_docs: List[Dict]) -> GroundednessCheck:
+    async def verify_groundedness(self, answer: str, context_docs: List[NodeWithScore]) -> GroundednessCheck:
         """Uses an LLM to verify if the answer is grounded in the provided context."""
-        context_str = "\n\n".join([doc.get('content', '') for doc in context_docs])
+        context_str = "\n\n".join([doc.node.get_content() for doc in context_docs])
         prompt = self.groundedness_prompt_template.format(context=context_str, answer=answer)
         
         try:

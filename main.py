@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI):
     try:
         builder = SystemBuilder()
         rag_orchestrator, vector_index = builder.build_all()
+        
+        # Manually sync retrievers after the index is loaded
+        if rag_orchestrator:
+            rag_orchestrator.load_and_sync_retrievers()
+
         app.state.rag_orchestrator = rag_orchestrator
         app.state.vector_index = vector_index
         logging.info("--- Application Initialization Complete ---")

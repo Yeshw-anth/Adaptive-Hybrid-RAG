@@ -2,8 +2,8 @@ import logging
 from typing import List, Any
 from llama_index.core.schema import TextNode
 from llama_index.core.embeddings import BaseEmbedding
+from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
 from src.chunking.strategies.base_strategy import BaseChunkingStrategy
 from src.config import settings
 
@@ -29,26 +29,31 @@ class TextChunkingStrategy(BaseChunkingStrategy):
 
     async def process(self, elements: List[Any], file_path: str) -> List[TextNode]:
         """
-        Processes a list of text elements by combining them and splitting hierarchically.
+        Processes a list of unstructured elements by converting them to LangChain
+        Documents and then splitting them.
         """
         if not elements:
             return []
 
-        # Combine the text from all elements into a single string.
-        full_text = "\n\n".join([el.text for el in elements]).strip()
-        if not full_text:
+        # Convert unstructured elements to LangChain Documents.
+        # This preserves the boundaries between elements.
+        langchain_docs = [Document(page_content=el.text) for el in elements if hasattr(el, 'text') and el.text.strip()]
+
+        if not langchain_docs:
+            logger.warning("No processable text found in the provided elements.")
             return []
 
-        # Use the hierarchical splitter to create more meaningful chunks.
-        text_chunks = self.splitter.split_text(full_text)
+        # Use the splitter to create chunks from the list of Documents.
+        text_chunks = self.splitter.split_documents(langchain_docs)
 
         all_nodes = []
-        for i, text_chunk in enumerate(text_chunks):
+        for i, chunk in enumerate(text_chunks):
             logger.debug(
                 f"Creating node {i+1}/{len(text_chunks)}. "
-                f"Content: '{text_chunk[:80].strip()}...'"
+                f"Content: '{chunk.page_content[:80].strip()}...'"
             )
-            node = TextNode(text=text_chunk)
+            # Convert the LangChain Document chunk back to a LlamaIndex TextNode
+            node = TextNode(text=chunk.page_content)
             all_nodes.append(node)
         
         return all_nodes

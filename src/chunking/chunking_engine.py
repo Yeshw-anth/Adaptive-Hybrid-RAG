@@ -1,79 +1,122 @@
-import os
 import logging
-from typing import List
-from itertools import groupby
-from llama_index.core.schema import TextNode, Document
-from llama_index.core.embeddings import BaseEmbedding
+from typing import List, Dict, Any
+from llama_index.core.schema import TextNode
+from unstructured.documents.elements import Element, Table
 
+from src.chunking.segmentation_evaluator import SegmentationEvaluator
 from src.chunking.strategy_factory import StrategyFactory
-from src.chunking.structure_extractor import StructureExtractor
-from src.chunking.metadata_enricher import MetadataEnricher
 
 logger = logging.getLogger(__name__)
 
 class ChunkingEngine:
     """
-    The central orchestrator for the adaptive chunking process.
-    This engine uses a multi-layered approach:
-    1. It uses a SectionExtractor to identify logical sections in the document.
-    2. If sectioning fails, it falls back to a simple text splitter.
-    3. Within each section, it groups elements by content type (text, image, etc.).
-    4. It delegates the chunking of each group to a specialized strategy.
+    Orchestrates the document chunking process. It first uses a segmentation evaluator
+    to divide the document into high-level semantic or structural sections. Then, it
+    dispatches the elements within each section to content-specific chunking strategies
+    (e.g., for text, tables) to produce fine-grained TextNode objects.
     """
-
-    def __init__(self, embedding_model: BaseEmbedding):
-        self.strategy_factory = StrategyFactory(embedding_model=embedding_model)
-        self.structure_extractor = StructureExtractor()
-        self.metadata_enricher = MetadataEnricher()
-        logger.info("ChunkingEngine initialized with StructureExtractor and MetadataEnricher.")
-
-    async def chunk_document(self, file_path: str) -> List[TextNode]:
+    def __init__(self, segmentation_evaluator: SegmentationEvaluator, strategy_factory: StrategyFactory):
         """
-        Processes a document from a file path using a section-aware, multi-modal approach.
-        """
-        logger.info(f"Starting chunking process for file: {file_path}")
+        Initializes the ChunkingEngine.
 
-        # 1. Identify logical sections using the StructureExtractor
-        sections = self.structure_extractor.extract_sections(file_path)
-        if not sections:
-            logger.warning(f"No sections were extracted from {file_path}. Aborting chunking.")
-            return []
+        Args:
+            segmentation_evaluator: The evaluator that runs segmentation strategies.
+            strategy_factory: A factory to get the appropriate chunking strategy for each element type.
+        """
+        self.segmentation_evaluator = segmentation_evaluator
+        self.strategy_factory = strategy_factory
+        logger.info("ChunkingEngine initialized with segmentation evaluator and strategy factory.")
+
+    async def chunk_document(
+        self,
+        elements: List[Element],
+        file_path: str,
+        initial_strategy: str = 'structural'
+    ) -> List[TextNode]:
+        """
+        Chunks a document by first segmenting it into sections and then processing
+        the elements within each section using content-specific strategies.
+
+        Args:
+            elements: A list of unstructured document elements.
+            file_path: The path to the original document.
+            initial_strategy: The preferred strategy for the evaluator to start with.
+
+        Returns:
+            A list of TextNode objects representing the chunked document.
+        """
+        logger.info(f"Starting chunking for '{file_path}' with initial strategy: '{initial_strategy}'")
         
+        sections, successful_strategy = self.segmentation_evaluator.segment_document(
+            elements, file_path, initial_strategy=initial_strategy
+        )
+
+        if not sections:
+            logger.error(f"Segmentation evaluator returned no sections for {file_path} (strategy: {successful_strategy}).")
+            return []
+
         all_nodes = []
-
-        # 2. Process each section (even if there's only one)
         for section in sections:
-            section_title = section.get("title", "Untitled")
-            section_elements = section.get("elements", [])
-            logger.debug(f"Processing section: '{section_title}' with {len(section_elements)} elements.")
+            section_title = section.get('title', 'Untitled Section')
+            section_elements = section.get('elements', [])
             
-            # 3. Group elements by type WITHIN the section
-            def get_element_type(element: Document):
-                # The 'unstructured' library uses the 'category' attribute for element type.
-                # We use getattr for safe access with a default value.
-                return getattr(element.metadata, 'category', 'text')
+            if not section_elements:
+                continue
 
-            element_groups = groupby(section_elements, key=get_element_type)
+            # Group consecutive elements of the same type to be processed together
+            element_groups = self._group_elements_by_strategy(section_elements)
 
-            for element_type, group in element_groups:
-                group_elements = list(group)
-                logger.debug(f"  - Processing group of {len(group_elements)} elements of type '{element_type}'.")
+            for strategy_name, group in element_groups:
+                strategy = self.strategy_factory.get_strategy(strategy_name)
                 
-                strategy = self.strategy_factory.get_strategy(element_type)
+                # The process method of a strategy should handle one or more elements
+                nodes = await strategy.process(group, file_path)
                 
-                # 4. Delegate to the appropriate strategy to get basic nodes
-                group_nodes = await strategy.process(group_elements, file_path)
-                
-                # 5. Enrich nodes with centralized metadata
-                enriched_nodes = self.metadata_enricher.enrich_nodes(
-                    group_nodes,
-                    file_name=os.path.basename(file_path),
-                    file_path=file_path,
-                    section_title=section_title
-                )
-                
-                all_nodes.extend(enriched_nodes)
-                logger.debug(f"  - Generated and enriched {len(enriched_nodes)} nodes for type '{element_type}'.")
+                # Add section-level metadata to each node
+                for node in nodes:
+                    node.metadata.update({
+                        "file_path": file_path,
+                        "section_title": section_title,
+                        "segmentation_strategy": successful_strategy,
+                    })
+                all_nodes.extend(nodes)
 
-        logger.info(f"Chunking complete for {file_path}. Generated {len(all_nodes)} total nodes.")
+        logger.info(f"Successfully chunked '{file_path}' into {len(all_nodes)} nodes using '{successful_strategy}' strategy.")
         return all_nodes
+
+    def _group_elements_by_strategy(self, elements: List[Element]) -> List[tuple[str, List[Element]]]:
+        """
+        Groups consecutive elements that should be processed by the same strategy.
+        
+        For example, multiple `NarrativeText` elements would be grouped together for the 'text' strategy.
+        A `Table` element would be in its own group for the 'table' strategy.
+        """
+        if not elements:
+            return []
+
+        groups = []
+        current_strategy = None
+        current_group = []
+
+        for el in elements:
+            strategy_name = self._determine_strategy_for_element(el)
+            
+            if strategy_name != current_strategy and current_group:
+                groups.append((current_strategy, current_group))
+                current_group = []
+            
+            current_strategy = strategy_name
+            current_group.append(el)
+        
+        if current_group:
+            groups.append((current_strategy, current_group))
+            
+        return groups
+
+    def _determine_strategy_for_element(self, element: Element) -> str:
+        """Determines which strategy to use for a given element."""
+        if isinstance(element, Table):
+            return 'table'
+        # Add more conditions for images, code, etc.
+        # Default to text strategy
+        return 'text'

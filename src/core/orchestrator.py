@@ -1,6 +1,7 @@
 import time
 import logging
-from typing import List, Dict, Any, Tuple
+import uuid
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 
 from src.config import settings
@@ -12,6 +13,7 @@ from src.core.llm.ollama_client import OllamaClient as LLMClient
 from src.core.pipelines.base import Pipeline
 from src.core.outputlogs.output_logger import OutputLogger
 from src.data.schemas import OutputLog, Document, QueryMetadata, Strategy
+from src.core.cache.result_cache import ResultCache
 # from src.experimental.feedback.feedback_store import FeedbackStore
 
 logger = logging.getLogger(__name__)
@@ -36,9 +38,19 @@ class RAGOrchestrator:
         self.hybrid_retriever = hybrid_retriever
         self.keyword_retriever = keyword_retriever
         self.output_logger = OutputLogger()
+        self.cache = ResultCache()
+        self.index_version = str(uuid.uuid4()) # Initial version of the index
         # self.feedback_store = FeedbackStore() # Temporarily disabled
         logger.info(f"Initialized RAG orchestrator with pipelines: {list(self.pipelines.keys())}")
-        self.update_retriever_nodes() # Initial update on startup
+        logger.info(f"Initial index version: {self.index_version}")
+
+    def load_and_sync_retrievers(self):
+        """
+        This method should be called after the orchestrator is initialized,
+        once the vector index has loaded its data. It ensures the hybrid
+        and keyword retrievers are synced with the full document set.
+        """
+        self.update_retriever_nodes()
 
     async def ingest_and_process(self, file_path: str) -> List[Dict[str, Any]]:
         """Runs the ingestion pipeline and updates the system with new nodes."""
@@ -47,7 +59,7 @@ class RAGOrchestrator:
             raise ValueError("Ingestion pipeline is not configured.")
 
         # Run the ingestion pipeline to get the new nodes
-        new_nodes = await self.ingestion_pipeline.run(file_path)
+        new_nodes = await self.ingestion_pipeline.ingest_file_unstructured(file_path)
         if not new_nodes:
             logger.warning(f"Ingestion of {file_path} resulted in 0 nodes.")
             return []
@@ -65,6 +77,12 @@ class RAGOrchestrator:
 
         # IMPORTANT: Update the retrievers that depend on the full node list
         self.update_retriever_nodes()
+        
+        # Invalidate cache by updating the index version
+        self.index_version = str(uuid.uuid4())
+        logger.info(f"New documents ingested. Index version updated to: {self.index_version}")
+        self.cache.clear() # For simplicity, we clear the cache. A more advanced strategy could be used.
+
 
         logger.info(f"--- Ingestion process for {file_path} completed successfully. ---")
         return [node.to_dict() for node in new_nodes]
@@ -72,36 +90,58 @@ class RAGOrchestrator:
     def update_retriever_nodes(self):
         """Updates the nodes for retrievers that don't automatically sync with the index."""
         logger.info("Updating nodes for keyword and hybrid retrievers...")
-        if self.vector_index:
-            all_docs = list(self.vector_index.docstore.docs.values())
+        if self.vector_index and hasattr(self.vector_index, 'docstore'):
+            all_nodes = list(self.vector_index.docstore.docs.values())
             if self.keyword_retriever:
-                self.keyword_retriever.set_nodes(all_docs)
-                logger.info(f"Updated KeywordRetriever with {len(all_docs)} nodes.")
+                # The KeywordRetriever uses a 'set_nodes' method
+                self.keyword_retriever.set_nodes(all_nodes)
+                logger.info(f"Updated KeywordRetriever with {len(all_nodes)} nodes.")
             if self.hybrid_retriever:
-                self.hybrid_retriever.set_nodes(all_docs)
-                logger.info(f"Updated HybridRetriever with {len(all_docs)} nodes.")
+                self.hybrid_retriever.update_corpus(all_nodes)
+                logger.info(f"Updated HybridRetriever with {len(all_nodes)} nodes.")
         else:
-            logger.warning("Vector index not available. Cannot update retriever nodes.")
+            logger.warning("Vector index or docstore not available. Cannot update retriever nodes.")
 
     async def orchestrate_query(self, query: str, model_override: str | None = None) -> Dict[str, Any]:
         start_time = time.time()
         query_id = f"query_{int(start_time)}"
+        logger.info(f"--- Orchestrating query: '{query}' (ID: {query_id}) ---")
+
+        # Generate cache key using the current index version and query
+        cache_key = f"{self.index_version}:{query}"
+        cached_result = self.cache.get(cache_key)
+        if cached_result:
+            # Ensure latency is recalculated for the cached response
+            cached_result["latency"] = time.time() - start_time
+            cached_result["cached_response"] = True
+            return cached_result
+
         try:
-            logger.info(f"--- Orchestrating query: '{query}' (ID: {query_id}) ---")
-
             query_metadata, strategy = await self._analyze_and_select_strategy(query, model_override)
-
-            # The core logic is now delegated to the selected pipeline.
-            # The pipeline is responsible for retrieval, reranking, expansion, and generation.
-            pipeline_result = await self._execute_pipeline(query, strategy, query_metadata)
-
-            # Log the final output
-            self._log_output(query_id, query, pipeline_result)
-
-            return pipeline_result
-
         except Exception as e:
-            logger.error(f"Error during query orchestration for ID {query_id}: {e}", exc_info=True)
+            logger.warning(f"Query analysis failed: {e}. Falling back to default 'accurate' strategy.", exc_info=True)
+            # Create default metadata for the fallback
+            query_metadata = QueryMetadata(
+                intent="fact-seeking",
+                complexity="high",
+                keywords=[],
+                expected_answer_format="explanation",
+                query_type="complex"
+            )
+            # Correctly select the strategy using the router
+            strategy = self.strategy_router.select_strategy(query_metadata, model_override)
+
+        try:
+            pipeline_result = await self._execute_pipeline(query, strategy, query_metadata)
+            self._log_output(query_id, query, pipeline_result)
+            
+            # Cache the final result before returning
+            self.cache.set(cache_key, pipeline_result)
+            pipeline_result["cached_response"] = False
+            
+            return pipeline_result
+        except Exception as e:
+            logger.error(f"Error during pipeline execution for ID {query_id}: {e}", exc_info=True)
             return {"error": str(e), "status": "failed", "query_id": query_id}
 
     async def _analyze_and_select_strategy(self, query: str, model_override: str | None = None) -> Tuple[QueryMetadata, "Strategy"]:
@@ -124,8 +164,8 @@ class RAGOrchestrator:
 
         # The pipeline expects a dictionary with 'metadata' and 'strategy' keys.
         query_analysis = {
-            "metadata": query_metadata.model_dump(),
-            "strategy": strategy.model_dump()
+            "metadata": query_metadata,
+            "strategy": strategy
         }
 
         pipeline_result = await selected_pipeline.execute(query=query, query_analysis=query_analysis)
@@ -148,10 +188,13 @@ class RAGOrchestrator:
                 confidence_score = result.get("confidence_score")
                 action_taken = result.get("action_taken")
 
+            query_metadata_obj = result.get("query_metadata")
+            strategy_obj = result.get("strategy")
+
             log_entry = OutputLog(
                 query=query,
-                query_metadata=result.get("query_metadata", {}),
-                selected_strategy=result.get("strategy", {}),
+                query_metadata=query_metadata_obj if query_metadata_obj else {},
+                selected_strategy=strategy_obj if strategy_obj else {},
                 final_answer=result.get("answer", ""),
                 final_context=result.get("context", ""),
                 retrieved_docs=result.get("retrieved_docs", []),

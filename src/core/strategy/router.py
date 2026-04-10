@@ -35,9 +35,32 @@ class StrategyRouter:
         logger.info(f"Final Tuned Strategy: {final_strategy.model_dump_json(indent=2)}")
         return final_strategy
 
+    def get_default_accurate_strategy(self) -> Strategy:
+        """
+        Returns a hard-coded, sensible default 'accurate' strategy.
+        This is used as a reliable fallback when the analysis process fails.
+        """
+        logger.warning("Using hard-coded default 'accurate' strategy as a fallback.")
+        return Strategy(
+            pipeline="accurate",
+            retrieval_strategy="hybrid",
+            use_reranker=True,
+            model=settings.DEFAULT_LLM_MODEL,
+            top_k=10
+        )
+
+
     def _get_default_strategy(self, query_metadata: QueryMetadata) -> dict:
-        """Returns a sensible default strategy based on initial query complexity."""
-        if query_metadata.complexity == "low":
+        """Returns a sensible default strategy based on initial query analysis."""
+        # Use the "fast" pipeline only for the simplest, most direct queries.
+        is_truly_simple = (
+            query_metadata.complexity == "low" and 
+            query_metadata.intent == "fact-seeking" and 
+            query_metadata.query_type == "simple"
+        )
+
+        if is_truly_simple:
+            logger.info("Query assessed as simple. Starting with 'fast' pipeline.")
             return {
                 "pipeline": "fast",
                 "retrieval_strategy": "vector",
@@ -45,6 +68,8 @@ class StrategyRouter:
                 "model": settings.SMALL_LLM_MODEL,
                 "top_k": 5
             }
+        
+        logger.info("Query requires deeper analysis. Starting with 'accurate' pipeline.")
         return {
             "pipeline": "accurate",
             "retrieval_strategy": "vector", # Start with vector, can be upgraded

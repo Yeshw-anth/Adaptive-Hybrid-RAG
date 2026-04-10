@@ -59,62 +59,46 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
 @router.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...)):
     """
-    Uploads a file, processes it through the ingestion pipeline, and adds it to the index.
+    Uploads a file, processes it through the orchestrator's ingestion flow,
+    and adds it to the index.
     """
-    ingestion_pipeline = request.app.state.rag_orchestrator.ingestion_pipeline
-    vector_index = request.app.state.vector_index
+    rag_orchestrator = request.app.state.rag_orchestrator
+    if not rag_orchestrator:
+        raise HTTPException(status_code=503, detail="RAG orchestrator is not initialized.")
 
-    if not ingestion_pipeline or not vector_index:
-        raise HTTPException(status_code=503, detail="Core components are not initialized.")
+    # Save the file temporarily to a path that the orchestrator can access
+    upload_dir = settings.UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
+    file_path = os.path.join(upload_dir, file.filename)
     
     try:
-        # Save the file temporarily to process it
-        upload_dir = settings.UPLOAD_DIR
-        os.makedirs(upload_dir, exist_ok=True)
-        file_path = os.path.join(upload_dir, file.filename)
-
+        # Check for duplicate content before writing the file
         content = await file.read()
+        file_hash = hashlib.sha256(content).hexdigest()
+        if file_hash in processed_files_hashes:
+            return {"message": f"File '{file.filename}' with this content has already been processed."}
+
         with open(file_path, "wb") as buffer:
             buffer.write(content)
 
-        # Use a simple hash check to prevent re-processing
-        file_hash = hashlib.sha256(content).hexdigest()
-        if file_hash in processed_files_hashes:
-            os.remove(file_path)
-            return {"message": f"File '{file.filename}' with this content has already been processed."}
+        # Delegate the entire ingestion and processing to the orchestrator
+        new_nodes = await rag_orchestrator.ingest_and_process(file_path)
 
-        # --- Ingestion Strategy Routing ---
-        strategy = settings.INGESTION_STRATEGY
-        nodes = []
-        if strategy == "unstructured":
-            nodes = await ingestion_pipeline.ingest_file_unstructured(file_path)
-        elif strategy == "manual":
-            nodes = ingestion_pipeline.ingest_file_manual(file_path)
-        else:
-            os.remove(file_path)
-            raise HTTPException(status_code=400, detail=f"Invalid INGESTION_STRATEGY: '{strategy}'")
-
-        if not nodes:
-            os.remove(file_path)
+        if not new_nodes:
             return {"message": f"File '{file.filename}' was processed, but no content was extracted. It might be empty or unsupported."}
 
-        # Insert the nodes into the index and persist
-        vector_index.insert_nodes(nodes)
-        vector_index.storage_context.persist(persist_dir=settings.PERSIST_DIR)
-        
+        # Add hash to processed set and clean up
         processed_files_hashes.add(file_hash)
-        logging.info(f"Successfully indexed {len(nodes)} nodes from '{file.filename}'.")
-
-        # Clean up the temporary file
         os.remove(file_path)
 
-        return {"message": f"File '{file.filename}' uploaded and indexed successfully."}
+        return {"message": f"File '{file.filename}' uploaded and indexed successfully. {len(new_nodes)} nodes created."}
+    
     except Exception as e:
-        logging.error(f"Unhandled exception in upload_file: {e}", exc_info=True)
-        # Clean up in case of error
-        if 'file_path' in locals() and os.path.exists(file_path):
+        logging.error(f"Error during file upload and processing: {e}", exc_info=True)
+        # Clean up the temporary file in case of an error
+        if os.path.exists(file_path):
             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to process and index the file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to process and index the file: {str(e)}")
 
 @router.post("/upload_batch")
 async def upload_batch(request: Request, files: List[UploadFile] = File(...)):

@@ -17,7 +17,7 @@ class Retriever:
         """
         self.vector_index = vector_index
 
-    def retrieve(self, query: str, top_k: int, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+    def retrieve(self, query: str, top_k: int, filters: Dict[str, Any] = None) -> List[NodeWithScore]:
         """
         Retrieves the top_k most relevant chunks for a given query, with optional metadata filters.
 
@@ -57,14 +57,4 @@ class Retriever:
         # Trim to the desired top_k after filtering
         final_nodes = retrieved_nodes[:top_k]
 
-        # Format the results
-        search_results = [
-            {
-                "text": node.node.get_content(),
-                "metadata": node.node.metadata,
-                "score": node.score
-            }
-            for node in final_nodes
-        ]
-            
-        return search_results
+        return final_nodes

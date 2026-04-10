@@ -23,6 +23,11 @@ from src.core.pipelines.structured_pipeline import StructuredPipeline
 from src.core.pipelines.keyword_pipeline import KeywordPipeline
 from src.core.ingestion import IngestionPipeline
 from src.chunking.chunking_engine import ChunkingEngine
+from src.chunking.structure_segmenter import StructuralSegmenter
+from src.chunking.semantic_segmenter import SemanticSegmenter
+from src.chunking.segmentation_evaluator import SegmentationEvaluator
+from src.chunking.strategy_factory import StrategyFactory
+from src.chunking.strategies.text_strategy import TextChunkingStrategy
 from src.core.orchestrator import RAGOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -76,6 +81,7 @@ class SystemBuilder:
         logger.info("Building RAG components...")
         vector_index = self.components['vector_index']
         llm_client = self.components['llm_client']
+        embedder = self.components['embedder']
         all_docs = list(vector_index.docstore.docs.values())
 
         retriever = Retriever(vector_index=vector_index)
@@ -87,8 +93,26 @@ class SystemBuilder:
         hybrid_retriever = HybridRetriever(vector_retriever=retriever, all_docs=all_docs)
         cost_latency_controller = CostLatencyController()
         strategy_router = StrategyRouter(cost_latency_controller=cost_latency_controller)
-        chunking_engine = ChunkingEngine(embedding_model=self.components['embedder'])
-        ingestion_pipeline = IngestionPipeline(chunking_engine=chunking_engine, llm_client=llm_client)
+
+        # Build the advanced segmentation and chunking modules
+        structural_segmenter = StructuralSegmenter(embedder=embedder)
+        semantic_segmenter = SemanticSegmenter()
+        
+        segmentation_evaluator = SegmentationEvaluator(
+            structural_segmenter=structural_segmenter, 
+            semantic_segmenter=semantic_segmenter
+        )
+
+        strategy_factory = StrategyFactory(embedding_model=embedder)
+        chunking_engine = ChunkingEngine(
+            segmentation_evaluator=segmentation_evaluator,
+            strategy_factory=strategy_factory
+        )
+        
+        ingestion_pipeline = IngestionPipeline(
+            chunking_engine=chunking_engine, 
+            llm_client=llm_client
+        )
 
         self.components.update({
             'retriever': retriever,

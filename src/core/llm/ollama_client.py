@@ -149,6 +149,33 @@ Answer:
             logging.error(f"Error calling Ollama API from prompt: {e}")
             return f"Error: Could not get a response from the model. Details: {e}"
 
+    async def generate_with_system_prompt(self, system_prompt: str, user_prompt: str, model: str = settings.DEFAULT_LLM_MODEL) -> str:
+        """
+        Generates a response using both a system and a user prompt.
+        """
+        logger.info(f"Generating response with system prompt using model {model}.")
+        try:
+            client = ollama.AsyncClient()
+            
+            messages = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ]
+            
+            response = await client.chat(
+                model=model,
+                messages=messages,
+                options={
+                    "num_predict": 1024, # Increased for potentially complex JSON output
+                    "temperature": 0.1,
+                }
+            )
+            return response['message']['content']
+        except Exception as e:
+            logger.error(f"Error calling Ollama API with system prompt: {e}", exc_info=True)
+            return f"Error: Could not get a response from the model. Details: {e}"
+
+
 if __name__ == '__main__':
     # Example Usage
     # NOTE: This requires the Ollama server to be running with the 'phi3' or 'llama3' model.

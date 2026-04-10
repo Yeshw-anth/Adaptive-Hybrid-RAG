@@ -1,9 +1,8 @@
 import logging
 import json
 import re
-from typing import Literal, List, Dict
+from typing import Literal, List, Dict, get_args
 from pydantic import BaseModel, Field, ValidationError
-from enum import Enum
 
 from src.core.llm.ollama_client import OllamaClient
 from src.data.schemas import QueryMetadata
@@ -13,30 +12,11 @@ logger = logging.getLogger(__name__)
 
 # --- Pydantic Models for Strict Validation ---
 
-class Intent(str, Enum):
-    FACT_SEEKING = "fact-seeking"
-    SUMMARY = "summary"
-    COMPARISON = "comparison"
-    CAUSAL_ANALYSIS = "causal-analysis"
+Intent = Literal["fact-seeking", "summary", "comparison", "causal-analysis"]
+Complexity = Literal["low", "medium", "high"]
+ExpectedAnswerFormat = Literal["list", "single_value", "explanation", "code_snippet", "table"]
+QueryType = Literal["simple", "complex", "analytical", "comparative", "keyword"]
 
-class Complexity(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-class ExpectedAnswerFormat(str, Enum):
-    LIST = "list"
-    SINGLE_VALUE = "single_value"
-    EXPLANATION = "explanation"
-    CODE_SNIPPET = "code_snippet"
-    TABLE = "table"
-
-class QueryType(str, Enum):
-    SIMPLE = "simple"
-    COMPLEX = "complex"
-    ANALYTICAL = "analytical"
-    COMPARATIVE = "comparative"
-    KEYWORD = "keyword"
 
 class LLMAnalysisResponse(BaseModel):
     intent: Intent = Field(..., description="The user's primary goal.")
@@ -47,109 +27,101 @@ class LLMAnalysisResponse(BaseModel):
 
 class QueryAnalyzer:
     """
-    Analyzes a query to extract metadata. It uses a heuristic to quickly identify
-    keyword queries and an LLM for more complex, natural language queries.
+    Analyzes a query to extract metadata using a sophisticated LLM prompt
+    that encourages chain-of-thought reasoning to select the best strategy.
     """
 
     def __init__(self, llm_wrapper: OllamaClient, max_retries: int = 2):
         self.llm_wrapper = llm_wrapper
         self.max_retries = max_retries
-        self.question_words = {"who", "what", "when", "where", "why", "how", "which", "whom", "whose"}
-        self.prompt_template = """Analyze the user query below. Your task is to extract key attributes and respond ONLY with a valid JSON object. Do not include any other text, explanations, or markdown code fences.
+        self.last_error = ""
+        self.system_prompt = """You are an expert query analyzer for an advanced RAG system. Your task is to analyze the user's query, reason about the best strategy, and then output a single, valid JSON object.
 
-**JSON Schema:**
-{{
-  "intent": "{intents}",
-  "complexity": "{complexities}",
-  "keywords": ["string", "string", ...],
-  "expected_answer_format": "{formats}",
-  "query_type": "{query_types}"
-}}
+Here are the available RAG strategies and their use cases:
 
-**Instructions:**
-1.  **intent**: Choose the single best fit from the allowed values.
-2.  **complexity**: Choose the single best fit from the allowed values.
-3.  **keywords**: Extract 3-5 essential nouns, verbs, or named entities.
-4.  **expected_answer_format**: Choose the most likely format the user wants.
-5.  **query_type**: Choose the single best fit from the allowed values.
+1.  **`keyword`**:
+    *   **Use Case**: For simple, specific, fact-based lookups. Ideal for queries that look like search engine terms.
+    *   **Characteristics**: Short, few words, often contains proper nouns, model numbers, or specific terms. Lacks conversational language.
+    *   **Examples**: "Q3 2023 financial report", "llama2-7b context window", "system design for microservices"
 
-**User Query:** "{query}"
+2.  **`fast`**:
+    *   **Use Case**: For simple questions that can likely be answered from a single piece of context. Speed is a priority.
+    *   **Characteristics**: Conversational but straightforward. Asks "what is" or "who is".
+    *   **Examples**: "What is the capital of France?", "Who wrote 'The Great Gatsby'?"
 
-**Your JSON Response:**
+3.  **`accurate`**:
+    *   **Use Case**: For complex, nuanced, or comparative questions that require synthesizing information from multiple sources. Accuracy is the top priority.
+    *   **Characteristics**: Asks for comparisons ("compare", "vs"), analysis ("why", "how"), or summaries of broad topics.
+    *   **Examples**: "Compare the performance of GPT-4 and Claude 3 Opus.", "What are the main arguments for and against universal basic income?", "Summarize the plot of 'Dune'."
+
+4.  **`code`**:
+    *   **Use Case**: For queries that explicitly ask for code, programming concepts, or software development help.
+    *   **Characteristics**: Mentions programming languages, libraries, algorithms, or development concepts.
+    *   **Examples**: "Show me a Python example of a class", "How to use the requests library in Go?", "What is the time complexity of quicksort?"
+
+Your reasoning should be based on these definitions. Your final output MUST be a single JSON object, with no other text.
 """
+        self.user_prompt_template = """Analyze the following query and provide a single, valid JSON response.
+
+**Query:** "{query}"
+
+**JSON Response Format:**
+```json
+{{
+    "intent": "MUST be one of: {intents}",
+    "complexity": "MUST be one of: {complexities}",
+    "keywords": ["list", "of", "keywords"],
+    "expected_answer_format": "MUST be one of: {formats}",
+    "query_type": "MUST be one of: {query_types}"
+}}
+```"""
         self.retry_prompt_template = """Your previous response was not valid JSON. Please correct it.
 Original Query: "{query}"
 Error: {error}
-Respond with ONLY the corrected JSON object.
+Respond with ONLY the corrected JSON object inside a `json` block.
 """
-
-    def _is_keyword_query(self, query: str) -> bool:
-        """
-        A heuristic to quickly determine if a query is likely a keyword search.
-        """
-        query_lower = query.lower()
-        words = query_lower.split()
-        
-        # Rule 1: Short query length
-        if len(words) <= 5:
-            # Rule 2: Does not start with a common question word
-            if not any(query_lower.startswith(word) for word in self.question_words):
-                logger.info(f"Query '{query}' classified as KEYWORD search by heuristic.")
-                return True
-        return False
 
     async def analyze(self, query: str, model_override: str = None) -> QueryMetadata:
         """
-        Analyzes the query, first using a heuristic for keyword searches,
-        then falling back to an LLM for more complex queries.
+        Analyzes the query using a sophisticated LLM chain-of-thought prompt.
         """
-        if self._is_keyword_query(query):
-            return QueryMetadata(
-                query=query,
-                intent="fact-seeking",  # Default for keyword
-                complexity="low",       # Default for keyword
-                keywords=query.split(),
-                expected_answer_format="single_value", # Default for keyword
-                query_type="keyword", # Explicitly set type
-                suggested_depth=3,
-                content_hints=[]
-            )
-
         model_to_use = model_override or settings.DEFAULT_LLM_MODEL
         
-        # Format the prompt in a single step to handle all placeholders correctly
-        base_prompt = self.prompt_template.format(
-            intents=", ".join(f'"{i.value}"' for i in Intent),
-            complexities=", ".join(f'"{c.value}"' for c in Complexity),
-            formats=", ".join(f'"{f.value}"' for f in ExpectedAnswerFormat),
-            query_types=", ".join(f'"{qt.value}"' for qt in QueryType),
-            query=query
+        # This prompt is now much more detailed and guides the LLM better.
+        user_prompt = self.user_prompt_template.format(
+            query=query,
+            intents=", ".join(f'"{i}"' for i in get_args(Intent)),
+            complexities=", ".join(f'"{c}"' for c in get_args(Complexity)),
+            formats=", ".join(f'"{f}"' for f in get_args(ExpectedAnswerFormat)),
+            query_types=", ".join(f'"{qt}"' for qt in get_args(QueryType))
         )
         
         for attempt in range(self.max_retries + 1):
-            prompt = base_prompt
+            prompt_for_llm = user_prompt
             if attempt > 0:
                 logger.warning(f"Query analysis failed on attempt {attempt}. Retrying...")
-                prompt = self.retry_prompt_template.format(query=query, error=self.last_error)
+                prompt_for_llm = self.retry_prompt_template.format(query=query, error=self.last_error)
             
-            logger.debug(f"Formatted prompt for LLM analysis (Attempt {attempt + 1}):\n{prompt}")
+            logger.debug(f"Formatted prompt for LLM analysis (Attempt {attempt + 1}):\n{prompt_for_llm}")
 
             try:
-                response_text = await self.llm_wrapper.generate_from_prompt(prompt, model=model_to_use)
+                # Use the new method that accepts a system prompt
+                response_text = await self.llm_wrapper.generate_with_system_prompt(
+                    system_prompt=self.system_prompt,
+                    user_prompt=prompt_for_llm,
+                    model=model_to_use
+                )
                 
-                # Use the new robust parsing function
                 json_content = self._extract_and_parse_json(response_text)
                 llm_response = LLMAnalysisResponse.parse_obj(json_content)
                 
                 metadata = QueryMetadata(
                     query=query,
-                    intent=llm_response.intent.value,
-                    complexity=llm_response.complexity.value,
+                    intent=llm_response.intent,
+                    complexity=llm_response.complexity,
                     keywords=llm_response.keywords,
-                    expected_answer_format=llm_response.expected_answer_format.value,
-                    query_type=llm_response.query_type.value,
-                    suggested_depth=4,
-                    content_hints=[]
+                    expected_answer_format=llm_response.expected_answer_format,
+                    query_type=llm_response.query_type
                 )
                 
                 logger.info(f"Query analysis successful: {metadata.model_dump_json(indent=2)}")
@@ -159,42 +131,29 @@ Respond with ONLY the corrected JSON object.
                 self.last_error = str(e)
                 logger.error(f"Attempt {attempt + 1}: Failed to parse or validate LLM response. Error: {self.last_error}")
                 if attempt == self.max_retries:
-                    logger.critical("Query analysis failed after multiple retries. Falling back to keyword search.")
-                    return QueryMetadata(
-                        query=query,
-                        intent="fact-seeking",
-                        complexity="low",
-                        keywords=query.split(),
-                        expected_answer_format="single_value",
-                        query_type="keyword",
-                        suggested_depth=3,
-                        content_hints=[]
-                    )
+                    logger.critical("Query analysis failed after multiple retries. Falling back to a default 'accurate' strategy.")
+                    return self._fallback_metadata(query)
             except Exception as e:
+                self.last_error = str(e)
                 logger.error(f"An unexpected error occurred during query analysis: {e}", exc_info=True)
                 if attempt == self.max_retries:
-                    logger.critical("Query analysis failed due to an unexpected error. Falling back to keyword search.")
-                    return QueryMetadata(
-                        query=query,
-                        intent="fact-seeking",
-                        complexity="low",
-                        keywords=query.split(),
-                        expected_answer_format="single_value",
-                        query_type="keyword",
-                        suggested_depth=3,
-                        content_hints=[]
-                    )
+                    logger.critical("Query analysis failed due to an unexpected error. Falling back to a default 'accurate' strategy.")
+                    return self._fallback_metadata(query)
 
         # This part should ideally not be reached, but as a final safeguard:
         logger.error("Fell through query analysis loop. This should not happen.")
+        return self._fallback_metadata(query)
+
+    def _fallback_metadata(self, query: str) -> QueryMetadata:
+        """Provides a safe, default metadata object when analysis fails."""
         return QueryMetadata(
             query=query,
             intent="fact-seeking",
-            complexity="low",
+            complexity="high", # Assume high complexity on failure
             keywords=query.split(),
-            expected_answer_format="single_value",
-            query_type="keyword",
-            suggested_depth=3,
+            expected_answer_format="explanation",
+            query_type="complex", # Default to complex to trigger 'accurate' pipeline
+            suggested_depth=4,
             content_hints=[]
         )
 
