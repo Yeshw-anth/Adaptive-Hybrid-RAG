@@ -2,7 +2,8 @@ from pydantic import BaseModel, Field
 from typing import List, Literal, Dict, Any
 
 class QueryMetadata(BaseModel):
-    query: str
+    normalized_query: str
+    keyword_tokens: List[str] = Field(default_factory=list)
     query_type: Literal["simple", "complex", "analytical", "comparative", "keyword"] = Field(default="simple")
     intent: Literal["fact-seeking", "summary", "comparison", "causal-analysis"] = Field(default="fact-seeking")
     complexity: Literal["low", "medium", "high"] = Field(default="low")

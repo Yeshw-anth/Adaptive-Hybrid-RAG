@@ -38,12 +38,6 @@ RERANKER_TOP_N = 5
 # The number of most similar chunks to retrieve for the Fast pipeline.
 FAST_PIPELINE_TOP_K = 5
 
-# --- Ingestion Settings ---
-# Select the ingestion strategy:
-# 'unstructured': (Recommended) Uses the 'unstructured' library for intelligent,
-#                 structure-aware parsing of all document types.
-# 'manual':       Uses a set of simpler, file-type-specific loaders.
-INGESTION_STRATEGY = "unstructured"
 
 # --- LLM & Embedding Model Settings ---
 # Specifies the embedding model to use for document and query vectorization.
@@ -56,6 +50,7 @@ LARGE_LLM_MODEL = "phi3"
 # --- Vector Store Settings ---
 # Directory to persist the FAISS vector store index.
 PERSIST_DIR = BASE_DIR / "storage"
+CACHE_DIR = BASE_DIR / "cache"
 
 # --- Data Settings ---
 # Directory for user-uploaded files.

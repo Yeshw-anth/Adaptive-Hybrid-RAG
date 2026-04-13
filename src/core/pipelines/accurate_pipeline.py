@@ -13,6 +13,7 @@ from llama_index.core.schema import NodeWithScore, TextNode
 from src.core.llm.ollama_client import OllamaClient
 from src.core.strategy.query_expander import QueryExpander
 from src.core.decision.confidence_engine import ConfidenceEngine
+from src.core.caching.response_cache import ResponseCache
 
 from src.config import settings
 
@@ -35,7 +36,7 @@ class AccuratePipeline(Pipeline):
         self.confidence_engine = confidence_engine
 
 
-    async def execute(self, query: str, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, query: str, query_analysis: Dict[str, Any], cache: Optional[ResponseCache] = None) -> Dict[str, Any]:
         start_time = time.time()
         logging.info(f"--- Running AccuratePipeline for query: '{query}' ---")
 
@@ -79,6 +80,18 @@ class AccuratePipeline(Pipeline):
             return self._format_abstain_response(decision_result, start_time, strategy, query_metadata)
 
         final_nodes = decision_result["final_docs"]
+        
+        # Caching logic starts here
+        if cache:
+            final_node_ids = sorted([node.node.id_ for node in final_nodes])
+            cached_response = cache.get(query, final_node_ids)
+            if cached_response:
+                logging.info(f"Cache hit for query: '{query}'. Returning cached response.")
+                cached_response["latency"] = time.time() - start_time
+                cached_response["pipeline"] = "accurate-cached"
+                return cached_response
+            logging.info(f"Cache miss for query: '{query}'. Proceeding with generation.")
+
         final_docs_for_context = final_nodes
 
         if strategy.use_parent_child:
@@ -91,7 +104,7 @@ class AccuratePipeline(Pipeline):
         logging.info(f"CONTEXT_SENT_TO_LLM: {context}")
 
         try:
-            answer = await self.llm_client.generate_response(context, query, strategy.model)
+            answer = await self.llm_client.generate_structured_response(context, query, strategy.model)
         except Exception as e:
             logging.error(f"Error during LLM generation in AccuratePipeline: {e}")
             return self._format_error_response(str(e), start_time, strategy, query_metadata)
@@ -112,6 +125,12 @@ class AccuratePipeline(Pipeline):
             expansion_details=decision_result["expansion_details"],
             confidence_before_expansion=decision_result.get("confidence_before_expansion", {}).get("final_score", 0.0)
         )
+        
+        if cache:
+            final_node_ids = sorted([node.node.id_ for node in final_nodes])
+            cache.set(query, final_node_ids, response)
+            logging.info(f"Response for query '{query}' stored in cache.")
+
         logging.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2)}")
         return response
 
@@ -120,8 +139,8 @@ class AccuratePipeline(Pipeline):
         Fetches parent documents for a list of nodes and merges them.
         Returns a list of NodeWithScore objects.
         """
-        if not self.retriever or not hasattr(self.retriever, 'vector_store'):
-            logger.warning("Retriever or vector_store not available. Skipping parent fetch.")
+        if not self.retriever:
+            logger.warning("Retriever not available. Skipping parent fetch.")
             return nodes
 
         parent_ids = set()
@@ -136,9 +155,8 @@ class AccuratePipeline(Pipeline):
 
         logger.info(f"Fetching {len(parent_ids)} parent documents.")
         
-        # Retrieve parent nodes from the docstore
-        # LlamaIndex get_nodes returns a Dict[str, BaseNode]
-        parent_nodes_dict = self.retriever.vector_store.get_nodes(list(parent_ids))
+        # Retrieve parent nodes using the new retriever method
+        parent_nodes_dict = self.retriever.get_nodes_by_ids(list(parent_ids))
         
         # Create NodeWithScore objects for the parents. Assign a neutral score.
         parent_node_with_scores = [
@@ -200,7 +218,7 @@ class AccuratePipeline(Pipeline):
         action = self.confidence_engine.decide_action_from_context(context_confidence)
 
         final_nodes = docs_for_confidence
-        expansion_details = {"expanded": False, "queries": [query], "retrieval_time": 0}
+        expansion_details = {"expanded": False, "queries": [query], "retrieval_time": 0.0}
         confidence_before_expansion = context_confidence
 
         if action == "expand":
@@ -303,7 +321,7 @@ class AccuratePipeline(Pipeline):
     def _format_sources(self, docs: List[Dict[str, Any]]) -> List[Dict]:
         sources = []
         for doc in docs:
-            source_item = {
+            source_item: Dict[str, Any] = {
                 "file": doc.get("file_path", "Unknown"),
                 "chunk_id": doc.get("id", "Unknown"),
             }

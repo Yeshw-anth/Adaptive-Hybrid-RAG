@@ -20,26 +20,28 @@ class CodePipeline(Pipeline):
         self.retriever = retriever
         self.reranker = reranker
 
-    async def execute(self, query: str, strategy: Dict[str, Any]) -> Dict[str, List[Document]]:
+    async def execute(self, query: str, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes the code-optimized RAG pipeline.
         Args:
             query: The user's query.
-            strategy: The strategy dictionary from the StrategyRouter.
+            query_analysis: A dictionary containing the query metadata and strategy.
         Returns:
             A dictionary with 'retrieved_docs' and 'reranked_docs'.
         """
         logger.info(f"--- Running CodePipeline for query: '{query}' ---")
+        
+        strategy: "Strategy" = query_analysis['strategy']
 
         # 1. Retrieval
-        top_k = strategy.get("top_k", 10)
+        top_k = strategy.top_k
         logger.info(f"Step 1: Retrieving documents with top_k={top_k}.")
         retrieved_nodes = self.retriever.retrieve(query, top_k=top_k)
         retrieved_docs = self._format_nodes_to_docs(retrieved_nodes)
         logger.info(f"Retrieved {len(retrieved_docs)} documents.")
 
         # 2. Reranking
-        if strategy.get("use_reranker", True) and retrieved_docs: # Reranking is default for code
+        if strategy.use_reranker and retrieved_docs: # Reranking is default for code
             logger.info("Step 2: Reranking documents.")
             reranked_nodes = self.reranker.rerank_nodes(query, retrieved_nodes)
             reranked_docs = self._format_nodes_to_docs(reranked_nodes)

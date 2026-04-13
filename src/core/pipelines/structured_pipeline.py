@@ -55,7 +55,7 @@ Pandas Code:
             logger.error(f"Error executing generated pandas code: {e}")
             raise
 
-    def execute(self, query: str, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(self, query: str, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         start_time = time.time()
         logger.info(f"Running StructuredPipeline for query: '{query}'")
 
@@ -85,23 +85,35 @@ Pandas Code:
 
             # 4. Generate pandas code from LLM
             prompt = self._generate_pandas_code_prompt(query, df_schema, df_head)
-            generated_code = self.llm_client.generate(
-                model=query_analysis['strategy'].get("model", "phi3"),
+            generated_code = (await self.llm_client.generate_async(
+                model=query_analysis['strategy'].model,
                 prompt=prompt,
                 temperature=0.0,
                 max_tokens=100
-            ).strip()
+            )).strip()
             
             logger.info(f"Generated pandas code: {generated_code}")
 
             # 5. Execute the code
-            result = self._execute_pandas_code(generated_code, df)
+            execution_result = self._execute_pandas_code(generated_code, df)
 
-            # 6. Format the result
-            if isinstance(result, (pd.DataFrame, pd.Series)):
-                answer = result.to_string()
+            # 6. Format the result from the code execution to be used as context
+            if isinstance(execution_result, (pd.DataFrame, pd.Series)):
+                code_output_str = execution_result.to_string()
             else:
-                answer = str(result)
+                code_output_str = str(execution_result)
+            
+            logger.info(f"Pandas code output:\n{code_output_str}")
+
+            # 7. Generate a structured, natural language answer based on the code's output
+            # This is the second LLM call, focused on presentation.
+            final_answer_context = f"The analysis of the structured data returned the following result:\n\n---\n{code_output_str}\n---"
+            
+            answer = await self.llm_client.generate_structured_response(
+                context=final_answer_context,
+                query=query,
+                model=query_analysis['strategy'].model
+            )
 
         except Exception as e:
             logger.error(f"Error during StructuredPipeline execution: {e}")

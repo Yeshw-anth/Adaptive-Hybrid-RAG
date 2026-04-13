@@ -17,13 +17,6 @@ class KeywordPipeline(Pipeline):
     def __init__(self, keyword_retriever: KeywordRetriever, llm_client: OllamaClient):
         self.retriever = keyword_retriever
         self.llm_client = llm_client
-        self.prompt_template = """Here is the user's query: "{query}"
-        
-Here are the most relevant documents found based on keyword search:
-{context}
-
-Based on these documents, please provide a direct and concise answer to the user's query.
-Answer:"""
 
     async def execute(self, query: str, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -49,11 +42,16 @@ Answer:"""
             }
 
         # Format context for the LLM
-        context_str = "\n\n".join([f"Document (ID: {doc['id']}):\n{doc['text']}" for doc in retrieved_docs])
+        context_str = "\n\n".join(
+            [f"Source {i+1}: {doc['text']}" for i, doc in enumerate(retrieved_docs)]
+        )
 
-        # 2. Generate a response using the LLM
-        prompt = self.prompt_template.format(query=query, context=context_str)
-        answer = await self.llm_client.generate_from_prompt(prompt)
+        # 2. Generate a response using the structured response generator
+        answer = await self.llm_client.generate_structured_response(
+            context=context_str,
+            query=query,
+            model=query_analysis['strategy'].model
+        )
 
         end_time = time.time()
         latency = end_time - start_time

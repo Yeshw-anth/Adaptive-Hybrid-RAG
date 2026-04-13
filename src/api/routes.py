@@ -11,7 +11,9 @@ from src.config import settings
 
 # Import other necessary components
 import hashlib
-from src.core.ingestion import IngestionPipeline
+from src.core.ingestion import IngestionRouter
+from src.chunking.chunking_engine import ChunkingEngine
+from src.chunking.metadata_enricher import MetadataEnricher
 
 
 # --- API Models ---
@@ -28,7 +30,8 @@ class QueryResponse(BaseModel):
 
 # --- Globals ---
 router = APIRouter()
-processed_files_hashes: Set[str] = set()
+
+
 
 # --- API Endpoints ---
 @router.post("/query", response_model=QueryResponse)
@@ -41,8 +44,8 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
         raise HTTPException(status_code=503, detail="RAG orchestrator is not initialized.")
     
     try:
-        result = await rag_orchestrator.orchestrate_query(
-            query=query_request.query,
+        result = await rag_orchestrator.query(
+            original_query=query_request.query,
             model_override=query_request.model
         )
         
@@ -57,115 +60,60 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
         raise HTTPException(status_code=500, detail="Error processing query.")
 
 @router.post("/upload")
-async def upload_file(request: Request, file: UploadFile = File(...)):
-    """
-    Uploads a file, processes it through the orchestrator's ingestion flow,
-    and adds it to the index.
-    """
-    rag_orchestrator = request.app.state.rag_orchestrator
-    if not rag_orchestrator:
-        raise HTTPException(status_code=503, detail="RAG orchestrator is not initialized.")
-
-    # Save the file temporarily to a path that the orchestrator can access
-    upload_dir = settings.UPLOAD_DIR
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
-    
-    try:
-        # Check for duplicate content before writing the file
-        content = await file.read()
-        file_hash = hashlib.sha256(content).hexdigest()
-        if file_hash in processed_files_hashes:
-            return {"message": f"File '{file.filename}' with this content has already been processed."}
-
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
-
-        # Delegate the entire ingestion and processing to the orchestrator
-        new_nodes = await rag_orchestrator.ingest_and_process(file_path)
-
-        if not new_nodes:
-            return {"message": f"File '{file.filename}' was processed, but no content was extracted. It might be empty or unsupported."}
-
-        # Add hash to processed set and clean up
-        processed_files_hashes.add(file_hash)
-        os.remove(file_path)
-
-        return {"message": f"File '{file.filename}' uploaded and indexed successfully. {len(new_nodes)} nodes created."}
-    
-    except Exception as e:
-        logging.error(f"Error during file upload and processing: {e}", exc_info=True)
-        # Clean up the temporary file in case of an error
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to process and index the file: {str(e)}")
-
-@router.post("/upload_batch")
-async def upload_batch(request: Request, files: List[UploadFile] = File(...)):
+async def upload(request: Request, files: List[UploadFile] = File(...)):
     """Uploads and processes multiple files concurrently."""
-    ingestion_pipeline = request.app.state.rag_orchestrator.ingestion_pipeline
     vector_index = request.app.state.vector_index
+    chunking_engine = request.app.state.chunking_engine
 
-    if not ingestion_pipeline or not vector_index:
+    if not all([vector_index, chunking_engine]):
         raise HTTPException(status_code=503, detail="Core components are not initialized.")
 
     upload_dir = settings.UPLOAD_DIR
     os.makedirs(upload_dir, exist_ok=True)
 
+    metadata_enricher = MetadataEnricher()
+
     async def process_file(file: UploadFile):
         file_path = os.path.join(upload_dir, file.filename)
+        file_name = file.filename
         try:
             content = await file.read()
             with open(file_path, "wb") as buffer:
                 buffer.write(content)
 
-            # Use a simple hash check to prevent re-processing
-            file_hash = hashlib.sha256(content).hexdigest()
-            if file_hash in processed_files_hashes:
-                os.remove(file_path)
-                return {"filename": file.filename, "status": "skipped", "message": "Content already processed."}
+            # 1. Loader
+            loader = IngestionRouter.get_loader(file_path)
+            elements = loader.process()
+            if not elements:
+                return {"filename": file_name, "status": "skipped", "message": "No content extracted."}
 
-            # --- Ingestion Strategy Routing ---
-            strategy = settings.INGESTION_STRATEGY
-            nodes = []
-            if strategy == "unstructured":
-                nodes = await ingestion_pipeline.ingest_file_unstructured(file_path)
-            elif strategy == "manual":
-                loop = asyncio.get_running_loop()
-                nodes = await loop.run_in_executor(
-                    None, ingestion_pipeline.ingest_file_manual, file_path
-                )
-            else:
-                os.remove(file_path)
-                return {"filename": file.filename, "status": "failed", "error": f"Invalid INGESTION_STRATEGY: '{strategy}'"}
+            # 2. Chunking
+            nodes = await chunking_engine.chunk_document(elements, file_path=file_path)
 
-            if not nodes:
-                os.remove(file_path)
-                return {"filename": file.filename, "status": "skipped", "message": "No content extracted."}
-
-            # This part is tricky for concurrency. For simplicity, we'll let LlamaIndex handle it.
-            # In a high-throughput system, you might collect all nodes and insert them in one batch.
-            vector_index.insert_nodes(nodes)
-            processed_files_hashes.add(file_hash)
+            # 3. Metadata Enrichment
+            enriched_nodes = metadata_enricher.enrich_nodes(nodes, file_name=file_name, file_path=file_path, section_title="General")
             
-            os.remove(file_path)
-            logging.info(f"Successfully indexed {len(nodes)} nodes from '{file.filename}'.")
-            return {"filename": file.filename, "status": "success", "node_count": len(nodes)}
+            # 4. Storage
+            vector_index.insert_nodes(enriched_nodes)
+            vector_index.storage_context.persist(persist_dir=settings.PERSIST_DIR)
+            
+            logging.info(f"Successfully indexed {len(enriched_nodes)} nodes from '{file_name}'.")
+            if enriched_nodes:
+                logging.info(f"Sample enriched metadata for {file_name}: {enriched_nodes[0].metadata}")
+
+            return {"filename": file_name, "status": "success", "node_count": len(enriched_nodes)}
         except Exception as e:
-            # Log the full error for debugging, but return a cleaner message to the user
-            logging.error(f"Error processing file {file.filename} in batch: {e}", exc_info=True)
+            logging.error(f"Error processing file {file_name} in batch: {e}", exc_info=True)
             error_message = f"An internal error occurred: {str(e)}"
+            return {"filename": file_name, "status": "failed", "error": error_message}
+        finally:
             if os.path.exists(file_path):
                 os.remove(file_path)
-            return {"filename": file.filename, "status": "failed", "error": error_message}
 
     tasks = [process_file(file) for file in files]
     results = await asyncio.gather(*tasks)
 
-    # Persist all changes at the end of the batch
-    vector_index.storage_context.persist(persist_dir=settings.PERSIST_DIR)
-    logging.info("Batch processing complete. Index persisted.")
-
+    logging.info("Batch processing complete.")
     return results
 
 # --- Feedback Endpoint (Future Scope) ---

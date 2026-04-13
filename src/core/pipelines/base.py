@@ -1,22 +1,24 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from llama_index.core.schema import NodeWithScore
+from src.core.caching.response_cache import ResponseCache
+import logging
 
 class Pipeline(ABC):
-    """
-    Abstract base class for all RAG execution pipelines.
-    """
+    """Abstract base class for all RAG pipelines."""
+
     @abstractmethod
-    async def execute(self, query: str, query_analysis: Any) -> Dict[str, Any]:
+    async def execute(self, query: str, query_analysis: Dict[str, Any], cache: Optional[ResponseCache] = None) -> Dict[str, Any]:
         """
         Executes the pipeline for a given query.
 
         Args:
-            query: The user's query.
-            query_analysis: The structured analysis of the query from the QueryAnalyzer.
+            query (str): The user's query.
+            query_analysis (Dict[str, Any]): The analysis of the query from the QueryAnalyzer.
+            cache (Optional[ResponseCache]): The response cache to use for this query.
 
         Returns:
-            A dictionary containing the response, sources, and other metadata.
+            Dict[str, Any]: A dictionary containing the results of the pipeline execution.
         """
         pass
 

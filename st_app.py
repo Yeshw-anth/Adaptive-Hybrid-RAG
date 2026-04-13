@@ -28,7 +28,7 @@ with st.sidebar:
                 
                 try:
                     # Send all files in a single request
-                    response = requests.post("http://127.0.0.1:8000/api/upload_batch", files=files_to_upload)
+                    response = requests.post("http://127.0.0.1:8000/api/upload", files=files_to_upload)
                     response.raise_for_status()
                     results = response.json()
                     

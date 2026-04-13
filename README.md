@@ -6,34 +6,40 @@ This is not just a simple RAG pipeline; it is a sophisticated orchestration engi
 
 ## System Architecture
 
+The system is designed around a sophisticated orchestration engine that manages the entire lifecycle of a query, from initial ingestion to final response generation.
+
+1.  **Tiered Ingestion Pipeline**: Documents are processed through a multi-stage pipeline that extracts content based on its structure. It uses a 3-tier fallback system for PDFs (PyMuPDF's advanced layout-aware extraction, then a simple text extraction, and finally OCR for scanned images), ensuring maximum data recovery.
+2.  **Adaptive Chunking**: The `ChunkingEngine` intelligently selects the best chunking strategy based on content type (text, code, tables, images), preserving the semantic integrity of the data.
+3.  **Query Preprocessing**: Before retrieval, every user query is passed through a `QueryProcessor`. It creates two versions: a minimally processed version for semantic vector search and a heavily cleaned version (stopwords removed, etc.) for precise keyword search.
+4.  **Dynamic Strategy Selection**: The `RAGOrchestrator` analyzes the preprocessed query to understand its intent and complexity, then selects the optimal retrieval pipeline (e.g., simple vector search, hybrid search with reranking).
+5.  **Hybrid Retrieval & Synthesis**: The selected pipeline fetches relevant data chunks using a combination of semantic and keyword search, re-ranks them for relevance, and then synthesizes a final, coherent answer using a Large Language Model.
+
 ![System Architecture](assets/architecture.png)
 
 ## Core Features
 
-- **Intelligent, Structure-Aware Ingestion**: Automatically parses complex documents (PDFs, DOCX, etc.) using the `unstructured` library to identify and preserve structural elements like headings, tables, text blocks, and images.
+- **Intelligent, 3-Tier PDF Ingestion**: Automatically parses complex PDFs using a fallback system: it first tries advanced, layout-aware extraction with PyMuPDF, falls back to simple text extraction, and finally uses OCR for scanned documents. This maximizes data recovery without external dependencies like Poppler.
 - **Adaptive Chunking Engine**: Goes far beyond simple fixed-size chunking. It applies specialized strategies for different content types:
   - **Text**: Uses a text splitter to split text into sentence and paragraph boundaries.
   - **Code**: Employs `Tree-sitter` for syntax-aware chunking, keeping logical code blocks (functions, classes) intact.
   - **Images**: Utilizes a multi-modal Vision-Language Model (VLM) to generate detailed captions, making visual information searchable.
   - **Tables**: Processes tables as structured data to preserve their tabular context.
+- **Dual-Mode Query Processor**: A dedicated `QueryProcessor` standardizes every incoming query for the hybrid retrieval system. It generates a `normalized` version for semantic search and a `cleaned` token list for keyword search, improving retrieval accuracy.
 - **Dynamic Strategy Router**: The "brain" of the system. It analyzes each user query to determine its intent, complexity, and required content types, then dynamically selects the most effective retrieval pipeline.
 - **Multiple Retrieval Pipelines**: 
   - **Fast Pipeline**: For simple queries, using a quick vector search.
   - **Accurate Pipeline**: For complex questions, using hybrid search (vector + keyword) and a Cross-Encoder reranker for maximum relevance.
   - **Specialized Pipelines**: Dedicated routes for `code`, `keyword`, and `structured` (table) queries.
-- **Configurable Ingestion**: Supports two ingestion backends, switchable via a single setting for benchmarking:
-  - `unstructured`: The modern, powerful, and recommended default.
-  - `manual`: A legacy system of file-specific loaders.
 - **Full Observability**: Detailed logging for every stage, from ingestion to final response generation, enabling easy debugging and performance analysis.
 
 ## What We Achieved
 
 This project successfully evolved from a basic RAG prototype into a robust, production-ready system. Key achievements include:
 
-1.  **Eliminated Over-Engineering**: We systematically removed complex, unnecessary components (like the `SemanticSplitter` and `Adjudicator`) in favor of a more direct and powerful architecture.
-2.  **Unified Ingestion Pipeline**: We replaced a clunky, manual system of individual file loaders with a single, elegant `ChunkingEngine` powered by `unstructured` and a factory of specialized chunking strategies.
-3.  **Intelligent Content-Aware Processing**: The system no longer treats all content as plain text. It understands the difference between prose, code, tables, and images, and processes each accordingly.
-4.  **Robustness and Configurability**: We removed hardcoded "magic numbers" and introduced clear configuration options in `settings.py`, making the system maintainable and easy to tune.
+1.  **Robust PDF & Query Handling**: We implemented a tiered PDF ingestion system that gracefully handles complex documents and a query processor that optimizes user input for hybrid search.
+2.  **Eliminated Over-Engineering**: We systematically removed complex, unnecessary components (like the `SemanticSplitter` and `Adjudicator`) in favor of a more direct and powerful architecture.
+3.  **Unified Ingestion Pipeline**: We replaced a clunky, manual system of individual file loaders with a single, elegant `ChunkingEngine` powered by `unstructured` and a factory of specialized chunking strategies.
+4.  **Intelligent Content-Aware Processing**: The system no longer treats all content as plain text. It understands the difference between prose, code, tables, and images, and processes each accordingly.
 5.  **Pragmatic, Production-Focused Design**: Every architectural decision was made with a focus on real-world performance, scalability, and maintainability.
 
 ## Setup and Installation
@@ -44,7 +50,7 @@ This project successfully evolved from a basic RAG prototype into a robust, prod
     cd auto-adaptive-rag
     ```
 
-2.  **Install Tesseract OCR:**
+2.  **Install Tesseract OCR (for Image Processing):**
     The `unstructured` library requires Tesseract for processing images and scanned PDFs. This is a system-level dependency.
 
     - **Windows:** Download and run the installer from the [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) page. **Important:** Add Tesseract to your system `PATH` during installation.
@@ -64,6 +70,12 @@ This project successfully evolved from a basic RAG prototype into a robust, prod
     python treesitter_build/build_grammars.py
     ```
 
+5.  **(Optional) Download NLTK Stopwords for Enhanced Keyword Search:**
+    For the best keyword cleaning performance, download the NLTK stopwords list. The system will function without this, but it will use a more basic list of stopwords.
+    ```bash
+    python -m nltk.downloader stopwords
+    ```
+
 ## How to Use the System
 
 ### 1. Run the FastAPI Server
@@ -72,15 +84,15 @@ This command starts the main application. For development, it's recommended to u
 
 **For development (with auto-reload):**
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8001
 ```
 
-**For  simple execution:**
+**For simple execution:**
 ```bash
 python main.py
 ```
 
-The server will be running at `http://127.0.0.1:8000`.
+The server will be running at `http://127.0.0.1:8001`.
 
 ### 2. Run the Streamlit UI
 
@@ -135,27 +147,28 @@ This project provides a powerful foundation that can be extended in many ways:
 
 ```
 auto-adaptive-hybrid-rag/
-│
-├── src/
-│   ├── api/                  # FastAPI endpoints
-│   ├── chunking/             # Adaptive chunking logic
-│   │   └── strategies/       # Strategies for different content types (text, code, image)
-│   ├── config/               # Configuration settings
-│   ├── core/                 # Core orchestration and system logic
-│   │   ├── decision/         # Decision engine for routing
-│   │   ├── llm/              # Language model wrappers
-│   │   ├── pipelines/        # RAG pipelines (fast, accurate, etc.)
-│   │   ├── retrieval/        # Retrieval and reranking logic
-│   │   └── strategy/         # Query analysis and strategy selection
-│   ├── data/                 # Data schemas and models
-│   │   └── ingestion/        # Document loading and parsing
-│   ├── evaluation/           # Evaluation scripts and datasets
-│   └── experimental/         # Experimental features
-│
-├── tests/                    # Test suite
-├── assets/                   # Images and other static assets
-├── main.py                   # FastAPI application entry point
-├── st_app.py                 # Streamlit UI application
-├── README.md                 # Project documentation
-└── requirements.txt          # Python dependencies
+
+ src/
+    api/                  # FastAPI endpoints
+    chunking/             # Adaptive chunking logic
+      strategies/       # Strategies for different content types (text, code, image)
+    config/               # Configuration settings
+    core/                 # Core orchestration and system logic
+       decision/         # Decision engine for routing
+       llm/              # Language model wrappers
+       pipelines/        # RAG pipelines (fast, accurate, etc.)
+       retrieval/        # Retrieval and reranking logic
+       strategy/         # Query analysis and strategy selection
+      query_processor.py  # Query normalization and cleaning
+    data/                 # Data schemas and models
+      ingestion/        # Document loading and parsing
+    evaluation/           # Evaluation scripts and datasets
+   experimental/         # Experimental features
+
+ tests/                    # Test suite
+ assets/                   # Images and other static assets
+ main.py                   # FastAPI application entry point
+ st_app.py                 # Streamlit UI application
+ README.md                 # Project documentation
+requirements.txt          # Python dependencies
 ```

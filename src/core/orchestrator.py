@@ -13,7 +13,8 @@ from src.core.llm.ollama_client import OllamaClient as LLMClient
 from src.core.pipelines.base import Pipeline
 from src.core.outputlogs.output_logger import OutputLogger
 from src.data.schemas import OutputLog, Document, QueryMetadata, Strategy
-from src.core.cache.result_cache import ResultCache
+from src.core.caching.response_cache import ResponseCache
+from src.core.query_processor import QueryProcessor
 # from src.experimental.feedback.feedback_store import FeedbackStore
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ class RAGOrchestrator:
     response generation and verification.
     """
 
-    def __init__(self, query_analyzer: QueryAnalyzer, strategy_router: StrategyRouter, query_expander: QueryExpander, pipelines: Dict[str, Pipeline], confidence_engine: ConfidenceEngine, llm_client: LLMClient, retriever: Any = None, ingestion_pipeline: Any = None, vector_index: Any = None, hybrid_retriever: Any = None, keyword_retriever: Any = None):
+    def __init__(self, query_analyzer: QueryAnalyzer, strategy_router: StrategyRouter, query_expander: QueryExpander, pipelines: Dict[str, Pipeline], confidence_engine: ConfidenceEngine, llm_client: LLMClient, retriever: Any = None, ingestion_pipeline: Any = None, vector_index: Any = None, hybrid_retriever: Any = None, keyword_retriever: Any = None, response_cache: Optional[ResponseCache] = None):
         self.query_analyzer: QueryAnalyzer = query_analyzer
         self.strategy_router: StrategyRouter = strategy_router
         self.query_expander: QueryExpander = query_expander
@@ -38,7 +39,8 @@ class RAGOrchestrator:
         self.hybrid_retriever = hybrid_retriever
         self.keyword_retriever = keyword_retriever
         self.output_logger = OutputLogger()
-        self.cache = ResultCache()
+        self.cache = response_cache if response_cache else ResponseCache()
+        self.query_processor = QueryProcessor()
         self.index_version = str(uuid.uuid4()) # Initial version of the index
         # self.feedback_store = FeedbackStore() # Temporarily disabled
         logger.info(f"Initialized RAG orchestrator with pipelines: {list(self.pipelines.keys())}")
@@ -59,7 +61,7 @@ class RAGOrchestrator:
             raise ValueError("Ingestion pipeline is not configured.")
 
         # Run the ingestion pipeline to get the new nodes
-        new_nodes = await self.ingestion_pipeline.ingest_file_unstructured(file_path)
+        new_nodes = await self.ingestion_pipeline.ingest_file(file_path)
         if not new_nodes:
             logger.warning(f"Ingestion of {file_path} resulted in 0 nodes.")
             return []
@@ -102,52 +104,58 @@ class RAGOrchestrator:
         else:
             logger.warning("Vector index or docstore not available. Cannot update retriever nodes.")
 
-    async def orchestrate_query(self, query: str, model_override: str | None = None) -> Dict[str, Any]:
+    async def query(self, original_query: str, model_override: str | None = None) -> Dict[str, Any]:
+        """
+        The main entry point for processing a user query. It preprocesses the query,
+        analyzes it, selects a strategy, and executes the corresponding pipeline.
+        """
         start_time = time.time()
         query_id = f"query_{int(start_time)}"
-        logger.info(f"--- Orchestrating query: '{query}' (ID: {query_id}) ---")
+        logger.info(f"--- Orchestrating query: '{original_query}' (ID: {query_id}) ---")
 
-        # Generate cache key using the current index version and query
-        cache_key = f"{self.index_version}:{query}"
-        cached_result = self.cache.get(cache_key)
-        if cached_result:
-            # Ensure latency is recalculated for the cached response
-            cached_result["latency"] = time.time() - start_time
-            cached_result["cached_response"] = True
-            return cached_result
+        # --- Step 0: Preprocess the query ---
+        normalized_query = self.query_processor.normalize(original_query)
+        keyword_tokens = self.query_processor.clean_for_keywords(original_query)
+        logger.info(f"Normalized query for semantic search: '{normalized_query}'")
+        logger.info(f"Cleaned tokens for keyword search: {keyword_tokens}")
 
         try:
-            query_metadata, strategy = await self._analyze_and_select_strategy(query, model_override)
+            # We use the normalized query for semantic analysis and strategy selection
+            query_metadata, strategy = await self._analyze_and_select_strategy(
+                normalized_query, keyword_tokens, model_override
+            )
+
         except Exception as e:
             logger.warning(f"Query analysis failed: {e}. Falling back to default 'accurate' strategy.", exc_info=True)
-            # Create default metadata for the fallback
             query_metadata = QueryMetadata(
                 intent="fact-seeking",
                 complexity="high",
-                keywords=[],
+                keywords=keyword_tokens, # Use cleaned tokens for fallback
                 expected_answer_format="explanation",
-                query_type="complex"
+                query_type="complex",
+                normalized_query=normalized_query,
+                keyword_tokens=keyword_tokens
             )
-            # Correctly select the strategy using the router
             strategy = self.strategy_router.select_strategy(query_metadata, model_override)
 
         try:
-            pipeline_result = await self._execute_pipeline(query, strategy, query_metadata)
-            self._log_output(query_id, query, pipeline_result)
-            
-            # Cache the final result before returning
-            self.cache.set(cache_key, pipeline_result)
-            pipeline_result["cached_response"] = False
+            # The pipeline will receive the original query and the processed versions within the metadata
+            pipeline_result = await self._execute_pipeline(original_query, strategy, query_metadata)
+            self._log_output(query_id, original_query, pipeline_result)
             
             return pipeline_result
         except Exception as e:
             logger.error(f"Error during pipeline execution for ID {query_id}: {e}", exc_info=True)
             return {"error": str(e), "status": "failed", "query_id": query_id}
 
-    async def _analyze_and_select_strategy(self, query: str, model_override: str | None = None) -> Tuple[QueryMetadata, "Strategy"]:
+    async def _analyze_and_select_strategy(self, normalized_query: str, keyword_tokens: List[str], model_override: str | None = None) -> Tuple[QueryMetadata, "Strategy"]:
         """Analyzes the query and selects the appropriate RAG strategy."""
         logger.info("Step 1: Analyzing query and selecting strategy.")
-        query_metadata = await self.query_analyzer.analyze(query, model_override=model_override)
+        query_metadata = await self.query_analyzer.analyze(
+            normalized_query=normalized_query,
+            keyword_tokens=keyword_tokens,
+            model_override=model_override
+        )
         strategy = self.strategy_router.select_strategy(query_metadata,model_override=model_override)
         logger.info(f"Strategy selected: {strategy.pipeline}")
         return query_metadata, strategy
@@ -162,13 +170,38 @@ class RAGOrchestrator:
             logger.error(f"Pipeline '{pipeline_name}' not found.")
             raise ValueError(f"Pipeline '{pipeline_name}' not found.")
 
-        # The pipeline expects a dictionary with 'metadata' and 'strategy' keys.
+        # The pipeline will receive a dictionary with 'metadata' and 'strategy' keys.
         query_analysis = {
             "metadata": query_metadata,
             "strategy": strategy
         }
 
-        pipeline_result = await selected_pipeline.execute(query=query, query_analysis=query_analysis)
+        pipeline_result = await selected_pipeline.execute(
+            query=query, 
+            query_analysis=query_analysis
+        )
+        
+        # Post-processing for pipelines that only retrieve documents (like CodePipeline)
+        if 'answer' not in pipeline_result and 'reranked_docs' in pipeline_result:
+            logger.info("Pipeline returned documents. Generating final answer.")
+            
+            context_docs = pipeline_result['reranked_docs']
+            context_str = "\n\n".join(
+                [f"Source {i+1}: {doc.text}" for i, doc in enumerate(context_docs)]
+            )
+            
+            pipeline_result['answer'] = await self.llm_client.generate_structured_response(
+                context=context_str,
+                query=query,
+                model=strategy.model
+            )
+            pipeline_result['context'] = context_str
+            pipeline_result['final_docs'] = context_docs
+
+        # Ensure metadata and strategy are in the final result for logging
+        pipeline_result['query_metadata'] = query_metadata
+        pipeline_result['strategy'] = strategy
+        
         return pipeline_result
 
     def _log_output(self, query_id: str, query: str, result: Dict):

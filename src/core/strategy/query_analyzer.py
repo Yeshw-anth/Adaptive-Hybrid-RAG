@@ -81,7 +81,7 @@ Error: {error}
 Respond with ONLY the corrected JSON object inside a `json` block.
 """
 
-    async def analyze(self, query: str, model_override: str = None) -> QueryMetadata:
+    async def analyze(self, normalized_query: str, keyword_tokens: List[str], model_override: str = None) -> QueryMetadata:
         """
         Analyzes the query using a sophisticated LLM chain-of-thought prompt.
         """
@@ -89,7 +89,7 @@ Respond with ONLY the corrected JSON object inside a `json` block.
         
         # This prompt is now much more detailed and guides the LLM better.
         user_prompt = self.user_prompt_template.format(
-            query=query,
+            query=normalized_query,
             intents=", ".join(f'"{i}"' for i in get_args(Intent)),
             complexities=", ".join(f'"{c}"' for c in get_args(Complexity)),
             formats=", ".join(f'"{f}"' for f in get_args(ExpectedAnswerFormat)),
@@ -100,7 +100,7 @@ Respond with ONLY the corrected JSON object inside a `json` block.
             prompt_for_llm = user_prompt
             if attempt > 0:
                 logger.warning(f"Query analysis failed on attempt {attempt}. Retrying...")
-                prompt_for_llm = self.retry_prompt_template.format(query=query, error=self.last_error)
+                prompt_for_llm = self.retry_prompt_template.format(query=normalized_query, error=self.last_error)
             
             logger.debug(f"Formatted prompt for LLM analysis (Attempt {attempt + 1}):\n{prompt_for_llm}")
 
@@ -116,7 +116,8 @@ Respond with ONLY the corrected JSON object inside a `json` block.
                 llm_response = LLMAnalysisResponse.parse_obj(json_content)
                 
                 metadata = QueryMetadata(
-                    query=query,
+                    normalized_query=normalized_query,
+                    keyword_tokens=keyword_tokens,
                     intent=llm_response.intent,
                     complexity=llm_response.complexity,
                     keywords=llm_response.keywords,
@@ -132,25 +133,26 @@ Respond with ONLY the corrected JSON object inside a `json` block.
                 logger.error(f"Attempt {attempt + 1}: Failed to parse or validate LLM response. Error: {self.last_error}")
                 if attempt == self.max_retries:
                     logger.critical("Query analysis failed after multiple retries. Falling back to a default 'accurate' strategy.")
-                    return self._fallback_metadata(query)
+                    return self._fallback_metadata(normalized_query, keyword_tokens)
             except Exception as e:
                 self.last_error = str(e)
                 logger.error(f"An unexpected error occurred during query analysis: {e}", exc_info=True)
                 if attempt == self.max_retries:
                     logger.critical("Query analysis failed due to an unexpected error. Falling back to a default 'accurate' strategy.")
-                    return self._fallback_metadata(query)
+                    return self._fallback_metadata(normalized_query, keyword_tokens)
 
         # This part should ideally not be reached, but as a final safeguard:
         logger.error("Fell through query analysis loop. This should not happen.")
-        return self._fallback_metadata(query)
+        return self._fallback_metadata(normalized_query, keyword_tokens)
 
-    def _fallback_metadata(self, query: str) -> QueryMetadata:
+    def _fallback_metadata(self, normalized_query: str, keyword_tokens: List[str]) -> QueryMetadata:
         """Provides a safe, default metadata object when analysis fails."""
         return QueryMetadata(
-            query=query,
+            normalized_query=normalized_query,
+            keyword_tokens=keyword_tokens,
             intent="fact-seeking",
             complexity="high", # Assume high complexity on failure
-            keywords=query.split(),
+            keywords=keyword_tokens, # Use the pre-cleaned tokens as a fallback
             expected_answer_format="explanation",
             query_type="complex", # Default to complex to trigger 'accurate' pipeline
             suggested_depth=4,

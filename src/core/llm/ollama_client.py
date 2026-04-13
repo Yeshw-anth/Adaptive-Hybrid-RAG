@@ -11,6 +11,34 @@ class OllamaClient:
     A client for interacting with the Ollama API using the official 'ollama' library.
     """
 
+    async def generate_structured_response(self, context: str, query: str, model: str = settings.DEFAULT_LLM_MODEL) -> str:
+        """
+        Generates a structured response using a detailed prompt template.
+        """
+        system_prompt = (
+            "**System Prompt: You are a senior AI systems engineer.**\n\n"
+            "Your task is to provide a clear, concise, and structured answer to the user's query, "
+            "basing your response *exclusively* on the context provided below. Do not use any external knowledge."
+        )
+        
+        user_prompt = (
+            "**Instructions:**\n"
+            "1.  **Analyze the Context:** Carefully review all the provided context documents.\n"
+            "2.  **Synthesize the Answer:** Formulate a direct answer to the user's query based on the information in the context.\n"
+            "3.  **Cite Sources:** For each piece of information you use, you MUST cite the corresponding context document using the format `[Source X]`, where 'X' is the context number.\n"
+            "4.  **Structure the Output:** Format your response into two sections:\n"
+            "    *   **Direct Answer:** A concise, immediate answer to the user's question.\n"
+            "    *   **Detailed Explanation:** A more thorough explanation, elaborating on the answer and synthesizing information from multiple sources. Ensure all claims are supported by citations.\n"
+            "5.  **Handle Missing Information:** If the context does not contain the information needed to answer the query, state clearly: 'The provided context does not contain enough information to answer this question.' Do not attempt to answer.\n\n"
+            "--- CONTEXT ---\n"
+            "{context}\n"
+            "--- END CONTEXT ---\n\n"
+            "**User Query:** {query}\n\n"
+            "**Your Response:**"
+        ).format(context=context, query=query)
+
+        return await self.generate_with_system_prompt(system_prompt, user_prompt, model)
+
     async def generate_response(self, context: str, query: str, model: str = settings.DEFAULT_LLM_MODEL) -> str:
         """
         Generates a response using the Ollama API.

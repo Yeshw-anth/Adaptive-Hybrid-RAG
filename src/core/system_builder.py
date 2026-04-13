@@ -28,6 +28,7 @@ from src.chunking.semantic_segmenter import SemanticSegmenter
 from src.chunking.segmentation_evaluator import SegmentationEvaluator
 from src.chunking.strategy_factory import StrategyFactory
 from src.chunking.strategies.text_strategy import TextChunkingStrategy
+from src.core.caching.response_cache import ResponseCache
 from src.core.orchestrator import RAGOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -49,12 +50,17 @@ class SystemBuilder:
         self._build_pipelines()
         self._build_orchestrator()
         logger.info("--- System Build Process Finished ---")
-        return self.components['rag_orchestrator'], self.components['vector_index']
+        return (
+            self.components['rag_orchestrator'], 
+            self.components['vector_index'],
+            self.components['chunking_engine']
+        )
 
     def _build_core_services(self):
         logger.info("Building core services...")
         embedder = Embedder(model_name=settings.EMBED_MODEL_NAME)
         llm_client = OllamaClient()
+        response_cache = ResponseCache()
         
         # Respect the CLEAR_ON_RESTART setting for the persistent vector store.
         if settings.CLEAR_ON_RESTART and os.path.exists(settings.PERSIST_DIR):
@@ -75,6 +81,7 @@ class SystemBuilder:
         self.components['embedder'] = embedder
         self.components['llm_client'] = llm_client
         self.components['vector_index'] = vector_index
+        self.components['response_cache'] = response_cache
         logger.info("Core services built.")
 
     def _build_rag_components(self):
@@ -110,8 +117,7 @@ class SystemBuilder:
         )
         
         ingestion_pipeline = IngestionPipeline(
-            chunking_engine=chunking_engine, 
-            llm_client=llm_client
+            chunking_engine=chunking_engine
         )
 
         self.components.update({
@@ -124,7 +130,8 @@ class SystemBuilder:
             'hybrid_retriever': hybrid_retriever,
             'cost_latency_controller': cost_latency_controller,
             'strategy_router': strategy_router,
-            'ingestion_pipeline': ingestion_pipeline
+            'ingestion_pipeline': ingestion_pipeline,
+            'chunking_engine': chunking_engine
         })
         logger.info("RAG components built.")
 
@@ -166,7 +173,8 @@ class SystemBuilder:
             ingestion_pipeline=c['ingestion_pipeline'],
             vector_index=c['vector_index'],
             hybrid_retriever=c['hybrid_retriever'],
-            keyword_retriever=c['keyword_retriever']
+            keyword_retriever=c['keyword_retriever'],
+            response_cache=c['response_cache']
         )
         self.components['rag_orchestrator'] = rag_orchestrator
         logger.info("RAG orchestrator built.")

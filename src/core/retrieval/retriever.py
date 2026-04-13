@@ -58,3 +58,20 @@ class Retriever:
         final_nodes = retrieved_nodes[:top_k]
 
         return final_nodes
+
+    def get_nodes_by_ids(self, node_ids: List[str]) -> Dict[str, Any]:
+        """
+        Retrieves nodes from the docstore by their IDs.
+
+        Args:
+            node_ids (List[str]): A list of node IDs to retrieve.
+
+        Returns:
+            Dict[str, Any]: A dictionary of node IDs to retrieved nodes.
+        """
+        if not node_ids:
+            return {}
+        
+        # Retrieve nodes from the docstore via the vector_index
+        retrieved_nodes = self.vector_index.docstore.get_nodes(node_ids)
+        return {node.node_id: node for node in retrieved_nodes}

@@ -22,7 +22,7 @@ class SegmentationEvaluator:
         initial_strategy: Literal['structural', 'semantic'] = 'structural'
     ) -> (List[Dict[str, Any]], str):
         """
-        Segments the document using a hierarchical fallback strategy with strict validation.
+        Segments the document using a hierarchical fallback strategy.
         Returns the sections and the name of the strategy that was successful.
         """
         logger.info(f"Starting segmentation for '{file_path}' with initial strategy: '{initial_strategy}'")
@@ -33,31 +33,31 @@ class SegmentationEvaluator:
         sections = []
         successful_strategy = ""
 
-        # 1. Attempt structural segmentation. Success is defined as > 1 section.
+        # 1. Attempt structural segmentation
         if initial_strategy == 'structural':
-            structural_sections = self._run_structural_segmentation(elements, file_path)
-            if len(structural_sections) > 1:
-                logger.info(f"Structural segmentation successful for '{file_path}'.")
-                sections = structural_sections
+            sections = self._run_structural_segmentation(elements, file_path)
+            if len(sections) > 1:
                 successful_strategy = 'structural'
-
-        # 2. If structural failed, attempt semantic segmentation with strict validation.
-        if not successful_strategy:
-            logger.warning(f"Structural segmentation was ineffective. Falling back to semantic segmentation.")
-            semantic_sections = self._run_semantic_segmentation(elements, file_path)
-            if self._is_semantic_segmentation_valid(semantic_sections):
-                logger.info(f"Semantic segmentation successful for '{file_path}' after passing strict validation.")
-                sections = semantic_sections
-                successful_strategy = 'semantic'
+                logger.info(f"Structural segmentation successful for '{file_path}'.")
             else:
-                logger.warning(f"Semantic segmentation for '{file_path}' failed strict validation.")
+                logger.warning(f"Structural segmentation was ineffective for '{file_path}'.")
 
-        # 3. If all strategies fail, fallback to a single section containing all elements.
+        # 2. If structural failed or wasn't the initial strategy, attempt semantic segmentation
+        if not successful_strategy:
+            logger.info(f"Attempting semantic segmentation for '{file_path}'.")
+            sections = self._run_semantic_segmentation(elements, file_path)
+            if self._is_semantic_segmentation_valid(sections):
+                successful_strategy = 'semantic'
+                logger.info(f"Semantic segmentation successful for '{file_path}' after passing validation.")
+            else:
+                logger.warning(f"Semantic segmentation for '{file_path}' failed validation.")
+                sections = [] # Reset sections if validation fails
+
+        # 3. If all strategies fail, fallback to a single section
         if not successful_strategy:
             logger.warning("All primary segmentation strategies were ineffective. Falling back to a single document chunk.")
             successful_strategy = "full_document_fallback"
-            if elements:
-                sections = [{"title": "Full Document (Fallback)", "elements": elements}]
+            sections = [{"title": "Full Document (Fallback)", "elements": elements}]
 
         if not sections:
             logger.error(f"All segmentation attempts for {file_path} failed. No sections generated.")

@@ -52,20 +52,23 @@ async def lifespan(app: FastAPI):
     """
     logging.info("--- Starting Application Initialization ---")
     try:
+        logging.info("Building system components...")
         builder = SystemBuilder()
-        rag_orchestrator, vector_index = builder.build_all()
+        rag_orchestrator, vector_index, chunking_engine = builder.build_all()
         
-        # Manually sync retrievers after the index is loaded
+        logging.info("Syncing retrievers...")
         if rag_orchestrator:
             rag_orchestrator.load_and_sync_retrievers()
 
         app.state.rag_orchestrator = rag_orchestrator
         app.state.vector_index = vector_index
+        app.state.chunking_engine = chunking_engine
         logging.info("--- Application Initialization Complete ---")
     except Exception as e:
-        logging.critical(f"--- FATAL: Application failed to initialize ---", exc_info=True)
+        logging.critical(f"--- FATAL: Application failed to initialize: {e} ---", exc_info=True)
         app.state.rag_orchestrator = None
         app.state.vector_index = None
+        app.state.chunking_engine = None
     
     yield
     
