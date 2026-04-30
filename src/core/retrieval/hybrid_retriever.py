@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from rank_bm25 import BM25Okapi
 from src.core.retrieval.retriever import Retriever

@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 import os
 import asyncio
 from typing import List, Dict, Any
@@ -12,15 +12,19 @@ log_directory = "logs"
 os.makedirs(log_directory, exist_ok=True)
 log_file_path = os.path.join(log_directory, "evaluation.log")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_file_path, mode='w'),
-        logging.StreamHandler()
-    ]
+# Configure Loguru for file and console logging
+logger.remove() # Remove default handler to control all outputs
+logger.add(
+    lambda msg: print(msg, end=""),
+    format="{time:YYYY-MM-DD HH:mm:ss} - {level} - {message}",
+    level="INFO"
 )
-logger = logging.getLogger(__name__)
+logger.add(
+    log_file_path,
+    format="{time:YYYY-MM-DD HH:mm:ss} - {level} - {message}",
+    level="INFO",
+    mode="w"
+)
 # --- End Logging Setup ---
 
 
@@ -99,4 +103,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"A critical error occurred in the main execution block: {e}", exc_info=True)
     finally:
-        logging.shutdown()
+        pass  # Loguru handles shutdown automatically

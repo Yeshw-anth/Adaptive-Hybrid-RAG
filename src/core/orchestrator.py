@@ -1,5 +1,5 @@
 import time
-import logging
+from src.core.logging_config import logger
 import uuid
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
@@ -17,7 +17,6 @@ from src.core.caching.response_cache import ResponseCache
 from src.core.query_processor import QueryProcessor
 # from src.experimental.feedback.feedback_store import FeedbackStore
 
-logger = logging.getLogger(__name__)
 
 class RAGOrchestrator:
     """
@@ -96,7 +95,7 @@ class RAGOrchestrator:
             all_nodes = list(self.vector_index.docstore.docs.values())
             if self.keyword_retriever:
                 # The KeywordRetriever uses a 'set_nodes' method
-                self.keyword_retriever.set_nodes(all_nodes)
+                self.keyword_retriever.update_corpus([node.get_content() for node in all_nodes])
                 logger.info(f"Updated KeywordRetriever with {len(all_nodes)} nodes.")
             if self.hybrid_retriever:
                 self.hybrid_retriever.update_corpus(all_nodes)
@@ -141,12 +140,23 @@ class RAGOrchestrator:
         try:
             # The pipeline will receive the original query and the processed versions within the metadata
             pipeline_result = await self._execute_pipeline(original_query, strategy, query_metadata)
+            
+            # --- Step 3: Finalize and Log ---
+            end_time = time.time()
+            latency = end_time - start_time
+            pipeline_result['latency'] = latency
+            
+            logger.info(f"Query orchestration completed in {latency:.2f} seconds.")
+            
             self._log_output(query_id, original_query, pipeline_result)
             
             return pipeline_result
         except Exception as e:
             logger.error(f"Error during pipeline execution for ID {query_id}: {e}", exc_info=True)
-            return {"error": str(e), "status": "failed", "query_id": query_id}
+            end_time = time.time()
+            latency = end_time - start_time
+            logger.info(f"Query orchestration failed in {latency:.2f} seconds.")
+            return {"error": str(e), "status": "failed", "query_id": query_id, "latency": latency}
 
     async def _analyze_and_select_strategy(self, normalized_query: str, keyword_tokens: List[str], model_override: str | None = None) -> Tuple[QueryMetadata, "Strategy"]:
         """Analyzes the query and selects the appropriate RAG strategy."""

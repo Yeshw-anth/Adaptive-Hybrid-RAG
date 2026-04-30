@@ -1,12 +1,10 @@
 # src/core/caching/response_cache.py
-import logging
+from src.core.logging_config import logger
 from typing import List, Optional, Dict, Any
 from diskcache import Cache
 import hashlib
 
-from src.config import settings
-
-logger = logging.getLogger(__name__)
+from src.config.settings import settings
 
 class ResponseCache:
     """

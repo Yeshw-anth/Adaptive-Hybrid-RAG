@@ -1,13 +1,11 @@
 from typing import List, Dict, Any, Optional
 import numpy as np
-import logging
+from src.core.logging_config import logger
 import json
 from pydantic import BaseModel, Field
 from llama_index.core.schema import NodeWithScore
 from src.core.llm.ollama_client import OllamaClient
 from src.config import settings
-
-logger = logging.getLogger(__name__)
 
 # --- Pydantic Models for Groundedness Validation ---
 class GroundednessCheck(BaseModel):
@@ -118,7 +116,15 @@ class ConfidenceEngine:
         prompt = self.groundedness_prompt_template.format(context=context_str, answer=answer)
         
         try:
-            response_text = await self.llm_wrapper.generate_from_prompt(prompt, model=settings.LARGE_LLM_MODEL)
+            response_data = await self.llm_wrapper.generate_from_prompt(prompt, model=settings.LARGE_LLM_MODEL)
+            response_text = response_data["content"]
+            token_usage = response_data["token_usage"]
+
+            logger.info(
+                f"Groundedness check LLM call successful. "
+                f"Token usage: {token_usage['input_tokens']} (in), {token_usage['output_tokens']} (out)."
+            )
+
             # Basic JSON extraction
             start = response_text.find('{')
             end = response_text.rfind('}')

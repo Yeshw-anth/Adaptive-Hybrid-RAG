@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from llama_index.core.schema import TextNode
 from unstructured.documents.elements import Element, Table
@@ -6,7 +6,6 @@ from unstructured.documents.elements import Element, Table
 from src.chunking.segmentation_evaluator import SegmentationEvaluator
 from src.chunking.strategy_factory import StrategyFactory
 
-logger = logging.getLogger(__name__)
 
 class ChunkingEngine:
     """

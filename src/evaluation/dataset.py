@@ -1,9 +1,10 @@
 import json
 from typing import List, Dict
+from src.core.logging_config import logger
 import logging
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def load_test_dataset(path: str) -> List[Dict]:
     """
@@ -19,16 +20,16 @@ def load_test_dataset(path: str) -> List[Dict]:
         with open(path, 'r') as f:
             dataset = json.load(f)
     except FileNotFoundError:
-        logging.error(f"Dataset file not found at: {path}")
+        logger.error(f"Dataset file not found at: {path}")
         return []
     except json.JSONDecodeError:
-        logging.error(f"Malformed JSON in dataset file: {path}")
+        logger.error(f"Malformed JSON in dataset file: {path}")
         return []
 
     validated_dataset = []
     for i, item in enumerate(dataset):
         if not all(k in item for k in ["query", "expected_keywords", "expected_sources"]):
-            logging.warning(f"Skipping malformed entry at index {i} in {path}: Missing required keys.")
+            logger.warning(f"Skipping malformed entry at index {i} in {path}: Missing required keys.")
             continue
         validated_dataset.append(item)
         

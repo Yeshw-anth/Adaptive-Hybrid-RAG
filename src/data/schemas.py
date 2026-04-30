@@ -11,6 +11,7 @@ class QueryMetadata(BaseModel):
     suggested_depth: int = Field(default=4)
     expected_answer_format: Literal["list", "single_value", "explanation", "code_snippet", "table"] = Field(default="explanation")
     content_hints: List[Literal["table", "code", "text", "graph"]] = Field(default_factory=list)
+    retrieval_strategy: Literal["vector", "graph", "hybrid", "hybrid_graph"] = Field(default="vector")
     max_latency: float | None = Field(default=None, description="Maximum allowed latency in seconds")
     max_cost: float | None = Field(default=None, description="Maximum allowed cost in USD")
 

@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 import json
 import pandas as pd
 from typing import List, Dict, Any
@@ -10,7 +10,6 @@ from src.config import settings
 from src.core.orchestrator import RAGPipeline
 from src.evaluation.evaluator import Evaluator
 
-logger = logging.getLogger(__name__)
 
 class RAGEvaluator:
     """

@@ -1,10 +1,8 @@
-import logging
+from src.core.logging_config import logger
 import json
 from typing import List
 from llm.llm_wrapper import LLMWrapper
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class QueryExpander:
     """

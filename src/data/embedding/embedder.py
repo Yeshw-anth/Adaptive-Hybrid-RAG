@@ -1,8 +1,6 @@
-import logging
+from src.core.logging_config import logger
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 class Embedder(HuggingFaceEmbedding):
     """

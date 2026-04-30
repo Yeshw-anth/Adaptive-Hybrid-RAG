@@ -1,9 +1,7 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from src.core.llm.ollama_client import OllamaClient
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class Evaluator:
     """

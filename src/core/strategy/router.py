@@ -1,9 +1,8 @@
-import logging
+from src.core.logging_config import logger
 from src.config import settings
 from src.data.schemas import QueryMetadata, Strategy
 from src.core.decision.cost_latency_controller import CostLatencyController
 
-logger = logging.getLogger(__name__)
 
 class StrategyRouter:
     """

@@ -31,6 +31,26 @@ The system is designed around a sophisticated orchestration engine that manages 
   - **Accurate Pipeline**: For complex questions, using hybrid search (vector + keyword) and a Cross-Encoder reranker for maximum relevance.
   - **Specialized Pipelines**: Dedicated routes for `code`, `keyword`, and `structured` (table) queries.
 - **Full Observability**: Detailed logging for every stage, from ingestion to final response generation, enabling easy debugging and performance analysis.
+- **Hybrid Knowledge Graph Builder**: Instead of relying solely on an LLM, the system uses a sophisticated two-tier process to extract knowledge triples from text, combining speed with high recall.
+- **Graph-Native Reasoning Engine**: For complex questions, the system can translate natural language into a formal Cypher query to be executed directly on the Neo4j graph database. This enables multi-hop reasoning that is impossible with standard vector search. It includes a robust fallback to simpler graph retrieval for broader queries.
+
+## Knowledge Graph Construction
+
+To enable more advanced reasoning, the system can construct a knowledge graph from the ingested documents. It uses a powerful hybrid approach for triple extraction, designed to maximize both speed and accuracy. This process is orchestrated by the `KnowledgeGraphBuilder`.
+
+The system employs a two-tier "fast path" to extract as many triples as possible *before* resorting to a more expensive, LLM-based extraction.
+
+1.  **Tier 1: Advanced Grammatical Matching (Precision & Speed)**
+    -   **Technology**: Uses `spaCy`'s powerful `DependencyMatcher`.
+    -   **How it Works**: We define precise grammatical patterns (e.g., for Subject-Verb-Object and passive voice) that can be matched against the document's dependency parse tree.
+    -   **Benefit**: This is extremely fast and highly accurate for common sentence structures, providing a strong baseline of high-quality triples with minimal overhead.
+
+2.  **Tier 2: Open Information Extraction (Recall & Breadth)**
+    -   **Technology**: Integrates the industry-standard `Stanford OpenIE` library.
+    -   **How it Works**: This pre-trained system is designed to find a broad range of relational triples in text, even those that don't conform to simple grammatical patterns.
+    -   **Benefit**: This significantly increases the *recall* of our extraction process, finding valuable relationships that a purely rule-based system would miss.
+
+Only if these fast and efficient methods fail to extract meaningful triples from a text chunk does the system fall back to using a Large Language Model, ensuring that our most expensive resources are used only when necessary.
 
 ## What We Achieved
 
@@ -74,6 +94,12 @@ This project successfully evolved from a basic RAG prototype into a robust, prod
     For the best keyword cleaning performance, download the NLTK stopwords list. The system will function without this, but it will use a more basic list of stopwords.
     ```bash
     python -m nltk.downloader stopwords
+    ```
+
+6.  **Download SpaCy Model for Grammatical Analysis:**
+    The system uses spaCy's `en_core_web_sm` model for high-precision, rule-based triple extraction from text. This is a required step for the knowledge graph construction feature.
+    ```bash
+    python -m spacy download en_core_web_sm
     ```
 
 ## How to Use the System
@@ -137,11 +163,9 @@ Key settings can be modified in `src/config/settings.py`:
 ## Future Scope
 
 This project provides a powerful foundation that can be extended in many ways:
-
-- **Knowledge Graph Integration**: Augment the vector store with a knowledge graph to enable more complex, multi-hop reasoning.
-- **Agent-Based Workflows**: Develop autonomous agents that can use the RAG system as a tool to perform research, analysis, and report generation.
+- **Self-Correcting RAG with Feedback Loops**: Implement a "critique" step where the system evaluates its own generated answer against the source documents. If the answer is weakly supported, the system can automatically re-run the retrieval process with a refined query to improve accuracy.
+- **Agentic Workflows for Complex Tasks**: Develop autonomous agents that use the RAG system as a tool to perform complex, multi-step tasks like generating summary reports, comparing documents, or monitoring information streams.
 - **Advanced Evaluation Suite**: Expand the evaluation framework to continuously measure performance on metrics like answer relevance, faithfulness, and latency.
-- **UI Enhancements**: Build a more advanced user interface (e.g., using the included `st_app.py` Streamlit app) to visualize retrieval steps and allow for interactive feedback.
 
 ## Project Structure
 

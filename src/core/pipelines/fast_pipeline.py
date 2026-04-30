@@ -1,23 +1,26 @@
 
 import time
-import logging
+from src.core.logging_config import logger
 import json
 from typing import Dict, Any, List, Optional
 
 from src.core.pipelines.base import Pipeline
 from src.core.retrieval.retriever import Retriever
+from src.core.retrieval.graph_retriever import GraphRetriever
 from src.core.llm.ollama_client import OllamaClient
 from src.core.decision.confidence_engine import ConfidenceEngine
 from src.core.caching.response_cache import ResponseCache
 from src.config import settings
+from llama_index.core.schema import NodeWithScore, TextNode
 
 class FastPipeline(Pipeline):
     """
     A fast RAG pipeline that prioritizes speed over depth.
     It uses basic vector retrieval and no reranking or expansion.
     """
-    def __init__(self, retriever: Retriever, llm_client: OllamaClient, confidence_engine: ConfidenceEngine):
+    def __init__(self, retriever: Retriever, graph_retriever: GraphRetriever, llm_client: OllamaClient, confidence_engine: ConfidenceEngine):
         self.retriever = retriever
+        self.graph_retriever = graph_retriever
         self.llm_client = llm_client
         self.confidence_engine = confidence_engine
         self.prompt_template = (
@@ -41,66 +44,81 @@ class FastPipeline(Pipeline):
 
     async def execute(self, query: str, query_analysis: Dict[str, Any], cache: Optional[ResponseCache] = None) -> Dict[str, Any]:
         start_time = time.time()
-        logging.info(f"Running FastPipeline for query: '{query}'")
+        logger.info(f"Running FastPipeline for query: '{query}'")
 
-        # 1. Retrieve documents
+        # 1. Determine retrieval strategy
+        retrieval_strategy = query_analysis['strategy'].retrieval_strategy
+        logger.info(f"FastPipeline using retrieval strategy: {retrieval_strategy}")
+
+        # 2. Retrieve documents
         retrieval_start = time.time()
-        retrieved_nodes = self.retriever.retrieve(
-            query,
-            top_k=query_analysis['strategy'].top_k
-        )
+        context = ""
+        retrieved_nodes = []
+
+        if retrieval_strategy == 'graph':
+            graph_context = await self.graph_retriever.retrieve(query, model=query_analysis['strategy'].model)
+            if graph_context:
+                context = graph_context
+                # Create a dummy node for citation purposes
+                retrieved_nodes_with_score = [
+                    NodeWithScore(node=TextNode(text=graph_context, id_="graph_context", metadata={"file_path": "Knowledge Graph"}), score=1.0)
+                ]
+                retrieved_nodes = self._format_nodes_to_docs(retrieved_nodes_with_score)
+        else: # Default to vector retrieval
+            retrieved_nodes_with_score = self.retriever.retrieve(
+                query,
+                top_k=query_analysis['strategy'].top_k
+            )
+            if retrieved_nodes_with_score:
+                context = self._construct_context_from_nodes(retrieved_nodes_with_score)
+                retrieved_nodes = self._format_nodes_to_docs(retrieved_nodes_with_score)
+
         retrieval_time = time.time() - retrieval_start
         
-        if not retrieved_nodes:
+        if not context:
             return self._format_empty_response(query, start_time, query_analysis)
 
         # Caching logic
         if cache:
-            node_ids = sorted([node.node.id_ for node in retrieved_nodes])
+            node_ids = sorted([node['id'] for node in retrieved_nodes])
             cached_response = cache.get(query, node_ids)
             if cached_response:
-                logging.info(f"Cache hit for query: '{query}'. Returning cached response.")
+                logger.info(f"Cache hit for query: '{query}'. Returning cached response.")
                 cached_response["latency"] = time.time() - start_time
                 cached_response["pipeline"] = "fast-cached"
                 return cached_response
-            logging.info(f"Cache miss for query: '{query}'. Proceeding with generation.")
+            logger.info(f"Cache miss for query: '{query}'. Proceeding with generation.")
 
-        # The retriever returns NodeWithScore objects. Keep them as objects for now.
-        serializable_docs = [
-            {"id": node.node.id_, "text": node.get_text(), "metadata": node.metadata, "score": node.score}
-            for node in retrieved_nodes
-        ]
-        logging.info(f"RETRIEVED_CHUNKS: {json.dumps(serializable_docs, indent=2)}")
-
-        # 2. Construct context from nodes
-        context = self._construct_context_from_nodes(retrieved_nodes)
+        serializable_docs = retrieved_nodes
+        logger.info(f"RETRIEVED_CHUNKS: {json.dumps(serializable_docs, indent=2)}")
 
         # 3. Calculate context confidence and decide action
+        # Note: Confidence calculation might need adjustment for graph context
         confidence_result = self.confidence_engine.calculate_context_confidence(
             query_metadata=query_analysis['metadata'],
-            retrieved_docs=retrieved_nodes
+            retrieved_docs=retrieved_nodes # This needs to be adaptable
         )
         action = self.confidence_engine.decide_action_from_context(confidence_result)
 
         if action == "abstain":
-            logging.warning("Abstaining from answering due to low context confidence.")
+            logger.warning("Abstaining from answering due to low context confidence.")
             return self._format_empty_response(query, start_time, query_analysis)
 
         # 4. Generate full response
         generation_start = time.time()
         try:
-            prompt = self.prompt_template.format(context=context, query=query)
-            answer = await self.llm_client.generate_from_prompt(
-                prompt,
+            answer = await self.llm_client.generate_structured_response(
+                context,
+                query,
                 model=query_analysis['strategy'].model
             )
         except Exception as e:
-            logging.error(f"Error during LLM generation in FastPipeline: {e}")
+            logger.error(f"Error during LLM generation in FastPipeline: {e}")
             return self._format_error_response(str(e), start_time, query_analysis)
         generation_time = time.time() - generation_start
 
         # 5. Format and return response
-        final_retrieved_docs = self._format_nodes_to_docs(retrieved_nodes)
+        final_retrieved_docs = retrieved_nodes
         response = {
             "answer": answer,
             "sources": self._format_sources(final_retrieved_docs),
@@ -110,15 +128,15 @@ class FastPipeline(Pipeline):
             "strategy": query_analysis['strategy'],
             "pipeline": "fast",
             "confidence_score": confidence_result.get("context_score", 0.0),
-            "final_prompt": prompt
+            "context": context
         }
         
         if cache:
             node_ids = sorted([doc['id'] for doc in final_retrieved_docs])
             cache.set(query, node_ids, response)
-            logging.info(f"Response for query '{query}' stored in cache.")
+            logger.info(f"Response for query '{query}' stored in cache.")
             
-        logging.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2, default=str)}")
+        logger.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2, default=str)}")
         return response
 
     def _construct_context_from_nodes(self, nodes: List[Any]) -> str:

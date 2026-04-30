@@ -1,6 +1,6 @@
 # Force reload
 import time
-import logging
+from src.core.logging_config import logger
 import json
 from typing import Dict, Any, List, Optional
 
@@ -8,6 +8,7 @@ from src.data.schemas import Document, QueryMetadata, Strategy
 from src.core.pipelines.base import Pipeline
 from src.core.retrieval.retriever import Retriever
 from src.core.retrieval.hybrid_retriever import HybridRetriever
+from src.core.retrieval.hybrid_graph_retriever import HybridGraphRetriever
 from src.core.retrieval.cross_encoder import CrossEncoderReranker
 from llama_index.core.schema import NodeWithScore, TextNode
 from src.core.llm.ollama_client import OllamaClient
@@ -16,9 +17,6 @@ from src.core.decision.confidence_engine import ConfidenceEngine
 from src.core.caching.response_cache import ResponseCache
 
 from src.config import settings
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class AccuratePipeline(Pipeline):
     """
@@ -38,39 +36,39 @@ class AccuratePipeline(Pipeline):
 
     async def execute(self, query: str, query_analysis: Dict[str, Any], cache: Optional[ResponseCache] = None) -> Dict[str, Any]:
         start_time = time.time()
-        logging.info(f"--- Running AccuratePipeline for query: '{query}' ---")
+        logger.info(f"--- Running AccuratePipeline for query: '{query}' ---")
 
         strategy: Strategy = query_analysis['strategy']
         query_metadata: QueryMetadata = query_analysis['metadata']
         chunking_strategy = strategy.chunking_strategy if hasattr(strategy, 'chunking_strategy') else 'semantic'
-        logging.info(f"Using chunking strategy: {chunking_strategy}")
+        logger.info(f"Using chunking strategy: {chunking_strategy}")
 
-        logging.info("Step 1: Analyzing query for section filters...")
+        logger.info("Step 1: Analyzing query for section filters...")
         filters = None
 
-        logging.info("Step 2: Performing initial retrieval...")
-        retrieval_result = self._retrieve_docs(query, strategy, filters=filters)
+        logger.info("Step 2: Performing initial retrieval...")
+        retrieval_result = await self._retrieve_docs(query, strategy, model=strategy.model, filters=filters)
         initial_nodes = retrieval_result["docs"]
 
         if not initial_nodes and filters:
-            logging.warning("Filtered retrieval yielded no results. Falling back to broad retrieval.")
-            retrieval_result = self._retrieve_docs(query, strategy, filters=None)
+            logger.warning("Filtered retrieval yielded no results. Falling back to broad retrieval.")
+            retrieval_result = await self._retrieve_docs(query, strategy, model=strategy.model, filters=None)
             initial_nodes = retrieval_result["docs"]
 
         if not initial_nodes:
-            logging.warning("No documents found during initial retrieval.")
+            logger.warning("No documents found during initial retrieval.")
             return self._format_empty_response(query, start_time, strategy, query_metadata)
-        logging.info(f"Step 2: Retrieved {len(initial_nodes)} documents.")
+        logger.info(f"Step 2: Retrieved {len(initial_nodes)} documents.")
 
-        logging.info("Step 3: Reranking retrieved documents...")
+        logger.info("Step 3: Reranking retrieved documents...")
         rerank_result = self._rerank_docs(query, initial_nodes, strategy)
         reranked_nodes = rerank_result["docs"]
         if reranked_nodes:
-            logging.info(f"Step 3: Reranking complete. Top document score: {reranked_nodes[0].score}")
+            logger.info(f"Step 3: Reranking complete. Top document score: {reranked_nodes[0].score}")
         else:
-            logging.warning("Reranking returned no documents.")
+            logger.warning("Reranking returned no documents.")
 
-        logging.info("Step 4: Making decision on action (expand, generate, or abstain)...")
+        logger.info("Step 4: Making decision on action (expand, generate, or abstain)...")
         decision_result = await self._decide_and_expand(
             query, strategy, query_metadata, initial_nodes, reranked_nodes, initial_filters=filters
         )
@@ -86,28 +84,38 @@ class AccuratePipeline(Pipeline):
             final_node_ids = sorted([node.node.id_ for node in final_nodes])
             cached_response = cache.get(query, final_node_ids)
             if cached_response:
-                logging.info(f"Cache hit for query: '{query}'. Returning cached response.")
+                logger.info(f"Cache hit for query: '{query}'. Returning cached response.")
                 cached_response["latency"] = time.time() - start_time
                 cached_response["pipeline"] = "accurate-cached"
                 return cached_response
-            logging.info(f"Cache miss for query: '{query}'. Proceeding with generation.")
+            logger.info(f"Cache miss for query: '{query}'. Proceeding with generation.")
 
         final_docs_for_context = final_nodes
 
         if strategy.use_parent_child:
-            logging.info("Step 5a: Strategy requires parent-child retrieval. Fetching parent documents.")
+            logger.info("Step 5a: Strategy requires parent-child retrieval. Fetching parent documents.")
             final_docs_for_context = self._fetch_and_add_parents(final_nodes)
 
         # Convert to dicts for the final stages
         final_docs_as_dicts = self._format_nodes_to_docs(final_docs_for_context)
-        context = self._construct_context(final_docs_as_dicts)
-        logging.info(f"CONTEXT_SENT_TO_LLM: {context}")
+        
+        # Use fused context if available (from hybrid_graph retriever)
+        if "full_result" in retrieval_result and "fused_context" in retrieval_result["full_result"]:
+            context = retrieval_result["full_result"]["fused_context"]
+        # Use direct graph context if available (from graph_native retriever)
+        elif "graph_context" in retrieval_result:
+            context = retrieval_result["graph_context"]
+        else:
+            context = self._construct_context(final_docs_as_dicts)
+        
+        logger.info(f"CONTEXT_SENT_TO_LLM: {context}")
 
         try:
             answer = await self.llm_client.generate_structured_response(context, query, strategy.model)
         except Exception as e:
-            logging.error(f"Error during LLM generation in AccuratePipeline: {e}")
+            logger.error(f"Error during LLM generation in AccuratePipeline: {e}")
             return self._format_error_response(str(e), start_time, strategy, query_metadata)
+
 
         response = self._format_response(
             answer=answer,
@@ -129,9 +137,9 @@ class AccuratePipeline(Pipeline):
         if cache:
             final_node_ids = sorted([node.node.id_ for node in final_nodes])
             cache.set(query, final_node_ids, response)
-            logging.info(f"Response for query '{query}' stored in cache.")
+            logger.info(f"Response for query '{query}' stored in cache.")
 
-        logging.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2)}")
+        logger.info(f"GENERATED_RESPONSE: {json.dumps(response, indent=2)}")
         return response
 
     def _fetch_and_add_parents(self, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
@@ -170,22 +178,38 @@ class AccuratePipeline(Pipeline):
         return combined_nodes
 
 
-    def _retrieve_docs(self, query: str, strategy: "Strategy", filters: Dict[str, str] = None) -> Dict:
+    async def _retrieve_docs(self, query: str, strategy: "Strategy", model: str, filters: Dict[str, str] = None) -> Dict:
         retrieval_start = time.time()
         retrieval_strategy = strategy.retrieval_strategy
         depth = strategy.top_k
 
+        if retrieval_strategy == 'graph_native':
+            from src.core.retrieval.graph_retriever import GraphRetriever
+            graph_retriever = GraphRetriever()
+            graph_context = await graph_retriever.retrieve(query)
+            # For graph_native, the "context" is the result, and docs are empty
+            return {"docs": [], "time": time.time() - retrieval_start, "graph_context": graph_context}
+
         if retrieval_strategy == 'hybrid':
             retrieved_nodes = self.hybrid_retriever.retrieve(query, top_k=depth, filters=filters)
             if not retrieved_nodes:
-                logging.warning("Hybrid retrieval failed. Falling back to vector retrieval.")
+                logger.warning("Hybrid retrieval failed. Falling back to vector retrieval.")
                 retrieved_nodes = self.retriever.retrieve(query, top_k=depth, filters=filters)
+        elif retrieval_strategy == 'hybrid_graph':
+            retrieval_result = await self.hybrid_graph_retriever.retrieve(query, model=model, top_k=depth)
+            retrieved_nodes = retrieval_result["vector_docs"]
+            # The graph context is handled separately in the main execute method
         else:
             retrieved_nodes = self.retriever.retrieve(query, top_k=depth, filters=filters)
 
         retrieval_time = time.time() - retrieval_start
-        logging.info(
+        logger.info(
             f"Retrieval time: {retrieval_time:.4f}s, Candidates: {len(retrieved_nodes)}, Strategy: {retrieval_strategy}")
+        
+        # For hybrid_graph, we need to pass the full result
+        if retrieval_strategy == 'hybrid_graph':
+            return {"docs": retrieved_nodes, "time": retrieval_time, "full_result": retrieval_result}
+            
         return {"docs": retrieved_nodes, "time": retrieval_time}
 
     def _rerank_docs(self, query: str, docs: List[NodeWithScore], strategy: "Strategy") -> Dict:
@@ -202,7 +226,7 @@ class AccuratePipeline(Pipeline):
         reranked_nodes = reranked_nodes[:top_n]
 
         rerank_time = time.time() - rerank_start
-        logging.info(f"Rerank time: {rerank_time:.4f}s")
+        logger.info(f"Rerank time: {rerank_time:.4f}s")
         return {"docs": reranked_nodes, "time": rerank_time}
 
     async def _decide_and_expand(self, query: str, strategy: Strategy, query_metadata: QueryMetadata, initial_nodes: List[NodeWithScore],
@@ -222,7 +246,7 @@ class AccuratePipeline(Pipeline):
         confidence_before_expansion = context_confidence
 
         if action == "expand":
-            logging.info("Executing 'expand' action: Expanding query and re-retrieving.")
+            logger.info("Executing 'expand' action: Expanding query and re-retrieving.")
             expansion_details["expanded"] = True
 
             expanded_queries = await self.query_expander.expand(query, query_metadata)
@@ -246,7 +270,7 @@ class AccuratePipeline(Pipeline):
 
             # Re-evaluate confidence post-expansion
             context_confidence = self.confidence_engine.calculate_context_confidence(
-                query_metadata=query_metadata,
+                query_metadata=query_metadata.model_dump(),
                 retrieved_docs=merged_nodes,
                 reranked_docs=final_nodes
             )
@@ -268,7 +292,7 @@ class AccuratePipeline(Pipeline):
             if node.node.id_ not in unique_nodes:
                 unique_nodes[node.node.id_] = node
         
-        logging.info(f"Merged and deduplicated docs down to {len(unique_nodes)} unique docs.")
+        logger.info(f"Merged and deduplicated docs down to {len(unique_nodes)} unique docs.")
         return list(unique_nodes.values())
 
     def _format_nodes_to_docs(self, nodes: Optional[List[NodeWithScore]]) -> List[Dict[str, Any]]:

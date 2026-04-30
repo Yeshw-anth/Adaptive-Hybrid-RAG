@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 import json
 import re
 from typing import Literal, List, Dict, get_args
@@ -8,7 +8,6 @@ from src.core.llm.ollama_client import OllamaClient
 from src.data.schemas import QueryMetadata
 from src.config import settings
 
-logger = logging.getLogger(__name__)
 
 # --- Pydantic Models for Strict Validation ---
 
@@ -16,6 +15,7 @@ Intent = Literal["fact-seeking", "summary", "comparison", "causal-analysis"]
 Complexity = Literal["low", "medium", "high"]
 ExpectedAnswerFormat = Literal["list", "single_value", "explanation", "code_snippet", "table"]
 QueryType = Literal["simple", "complex", "analytical", "comparative", "keyword"]
+RetrievalStrategy = Literal["vector", "graph", "hybrid", "hybrid_graph"]
 
 
 class LLMAnalysisResponse(BaseModel):
@@ -24,6 +24,7 @@ class LLMAnalysisResponse(BaseModel):
     keywords: List[str] = Field(..., description="A list of 3-5 essential keywords.")
     expected_answer_format: ExpectedAnswerFormat = Field(..., description="The likely format for the answer.")
     query_type: QueryType = Field(..., description="The type of the query.")
+    retrieval_strategy: RetrievalStrategy = Field(..., description="The best retrieval strategy for the query.")
 
 class QueryAnalyzer:
     """
@@ -59,6 +60,11 @@ Here are the available RAG strategies and their use cases:
     *   **Characteristics**: Mentions programming languages, libraries, algorithms, or development concepts.
     *   **Examples**: "Show me a Python example of a class", "How to use the requests library in Go?", "What is the time complexity of quicksort?"
 
+5.  **`graph`**:
+    *   **Use Case**: For queries about relationships, connections, and multi-hop questions.
+    *   **Characteristics**: Asks "who works with whom", "how is X related to Y", "what is the structure of Z".
+    *   **Examples**: "How are the different components of the system connected?", "What is the relationship between the ingestion pipeline and the orchestrator?"
+
 Your reasoning should be based on these definitions. Your final output MUST be a single JSON object, with no other text.
 """
         self.user_prompt_template = """Analyze the following query and provide a single, valid JSON response.
@@ -72,7 +78,8 @@ Your reasoning should be based on these definitions. Your final output MUST be a
     "complexity": "MUST be one of: {complexities}",
     "keywords": ["list", "of", "keywords"],
     "expected_answer_format": "MUST be one of: {formats}",
-    "query_type": "MUST be one of: {query_types}"
+    "query_type": "MUST be one of: {query_types}",
+    "retrieval_strategy": "MUST be one of: {retrieval_strategies}"
 }}
 ```"""
         self.retry_prompt_template = """Your previous response was not valid JSON. Please correct it.
@@ -93,7 +100,8 @@ Respond with ONLY the corrected JSON object inside a `json` block.
             intents=", ".join(f'"{i}"' for i in get_args(Intent)),
             complexities=", ".join(f'"{c}"' for c in get_args(Complexity)),
             formats=", ".join(f'"{f}"' for f in get_args(ExpectedAnswerFormat)),
-            query_types=", ".join(f'"{qt}"' for qt in get_args(QueryType))
+            query_types=", ".join(f'"{qt}"' for qt in get_args(QueryType)),
+            retrieval_strategies=", ".join(f'"{rs}"' for rs in get_args(RetrievalStrategy))
         )
         
         for attempt in range(self.max_retries + 1):
@@ -105,13 +113,20 @@ Respond with ONLY the corrected JSON object inside a `json` block.
             logger.debug(f"Formatted prompt for LLM analysis (Attempt {attempt + 1}):\n{prompt_for_llm}")
 
             try:
-                # Use the new method that accepts a system prompt
-                response_text = await self.llm_wrapper.generate_with_system_prompt(
+                # The client now returns a dictionary with 'content' and 'token_usage'
+                response_data = await self.llm_wrapper.generate_with_system_prompt(
                     system_prompt=self.system_prompt,
                     user_prompt=prompt_for_llm,
                     model=model_to_use
                 )
-                
+                response_text = response_data["content"]
+                token_usage = response_data["token_usage"]
+
+                logger.info(
+                    f"Query analysis LLM call successful. "
+                    f"Token usage: {token_usage['input_tokens']} (in), {token_usage['output_tokens']} (out)."
+                )
+
                 json_content = self._extract_and_parse_json(response_text)
                 llm_response = LLMAnalysisResponse.parse_obj(json_content)
                 
@@ -122,7 +137,9 @@ Respond with ONLY the corrected JSON object inside a `json` block.
                     complexity=llm_response.complexity,
                     keywords=llm_response.keywords,
                     expected_answer_format=llm_response.expected_answer_format,
-                    query_type=llm_response.query_type
+                    query_type=llm_response.query_type,
+                    retrieval_strategy=llm_response.retrieval_strategy,
+                    token_usage=token_usage  # Store token usage in metadata
                 )
                 
                 logger.info(f"Query analysis successful: {metadata.model_dump_json(indent=2)}")

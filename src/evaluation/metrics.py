@@ -1,3 +1,4 @@
+from src.core.logging_config import logger
 from typing import List
 from sentence_transformers import util
 

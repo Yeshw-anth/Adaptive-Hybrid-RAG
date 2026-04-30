@@ -1,52 +1,64 @@
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
+from loguru import logger
 from pathlib import Path
+import json
 
-from src.config import settings
+from src.config.settings import settings
 
-def setup_logging():
+class InterceptHandler(logging.Handler):
     """
-    Configures centralized logging for the entire application.
-    - Logs to both a file and the console.
-    - Uses a rotating file handler to manage log file size.
+    Intercepts standard logging messages and redirects them to Loguru.
     """
-    log_level = settings.LOG_LEVEL
-    log_file = settings.LOG_FILE_PATH
+    def emit(self, record):
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
 
-    # Create log directory if it doesn't exist
-    log_dir = Path(log_file).parent
-    log_dir.mkdir(exist_ok=True)
+        frame, depth = logging.currentframe(), 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
 
-    # Create a root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
 
-    # --- File Handler ---
-    # This handler will overwrite the log file on each run (filemode='w').
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    file_handler.setFormatter(file_formatter)
-    file_handler.setLevel(log_level)
+# --- Centralized Logging Configuration ---
 
-    # --- Console Handler ---
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_formatter = logging.Formatter(
-        "%(name)-30s: %(levelname)-8s %(message)s"
-    )
-    console_handler.setFormatter(console_formatter)
-    console_handler.setLevel(log_level)
+# 1. We start by removing the default handler to ensure a clean slate.
+logger.remove()
 
-    # Add handlers to the root logger
-    # Avoid adding handlers if they already exist (e.g., during hot reloads)
-    if not root_logger.handlers:
-        root_logger.addHandler(file_handler)
-        root_logger.addHandler(console_handler)
+# 2. Add a new, clean console handler.
+logger.add(
+    sys.stdout,
+    level=settings.LOG_LEVEL.upper(),
+    format=settings.LOG_FORMAT_CONSOLE,
+    colorize=True,
+    backtrace=True,
+    diagnose=True
+)
 
-    # --- Suppress Noisy Third-Party Loggers ---
-    # Set the logging level for 'pdfminer' to WARNING to avoid excessive debug output.
-    logging.getLogger("pdfminer").setLevel(logging.WARNING)
-    
-    logging.info(f"Logging configured. Level: {log_level}. Output file: {log_file}")
+# 3. Add a file handler for persistent, structured logging.
+log_file = settings.LOG_FILE_PATH
+log_file.parent.mkdir(parents=True, exist_ok=True)
+logger.add(
+    log_file,
+    level=settings.LOG_LEVEL.upper(),
+    format=settings.LOG_FORMAT_FILE,
+    rotation=settings.LOG_ROTATION,
+    retention=settings.LOG_RETENTION,
+    compression="zip",
+    enqueue=True,  # Make file logging asynchronous
+    backtrace=True,
+    diagnose=True
+)
+
+# 4. Intercept standard logging to redirect logs from other libraries (like huggingface)
+#    to our configured Loguru sink. This prevents double logging.
+logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+logger.info(f"Logger configured: Level={settings.LOG_LEVEL}, Directory={settings.LOG_DIR}")
+
+# --- End of Configuration ---

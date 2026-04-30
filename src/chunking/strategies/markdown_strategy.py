@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from llama_index.core.schema import TextNode
 from langchain_text_splitters import MarkdownHeaderTextSplitter
@@ -6,7 +6,6 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter
 from src.chunking.strategies.base_strategy import BaseChunkingStrategy
 from src.data.schemas import DocumentMetadata
 
-logger = logging.getLogger(__name__)
 
 class MarkdownChunkingStrategy(BaseChunkingStrategy):
     """

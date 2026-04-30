@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from llama_index.core.schema import TextNode
 
@@ -7,7 +7,6 @@ from src.data.schemas import DocumentMetadata
 from src.experimental.multimodal.image_captioner import extract_structure_from_image
 from src.core.llm.ollama_client import OllamaClient
 
-logger = logging.getLogger(__name__)
 
 class ImageChunkingStrategy(BaseChunkingStrategy):
     """

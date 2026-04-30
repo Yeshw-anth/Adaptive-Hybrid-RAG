@@ -1,11 +1,10 @@
-import logging
+from src.core.logging_config import logger
 import re
 from typing import List, Dict, Any
 from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import Element, CompositeElement
 from src.data.embedding.embedder import Embedder
 
-logger = logging.getLogger(__name__)
 
 class StructuralSegmenter:
     """
@@ -96,7 +95,8 @@ class StructuralSegmenter:
                 continue
 
             try:
-                title_embedding, content_embedding = self.embedder.get_text_embedding_batch([title, content])
+                title_embedding = self.embedder.get_text_embedding(title)
+                content_embedding = self.embedder.get_text_embedding(content)
                 similarity = self.embedder.similarity(title_embedding, content_embedding)
                 
                 if similarity < 0.4:
