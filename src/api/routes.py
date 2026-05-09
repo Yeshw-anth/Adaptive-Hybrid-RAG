@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Set
 import asyncio
 import os
+from src.evaluation.ragas_evaluator import RagasEvaluator
 import shutil
 
 # Import the shared objects from settings.py
@@ -65,6 +66,13 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
     if not ingestion_pipeline:
         raise HTTPException(status_code=503, detail="Core components are not initialized.")
 
+    graph_path = settings.GRAPH_PATH
+    temp_graph_path = graph_path.with_suffix('.temp.json')
+
+    # The check for graph existence has been removed to allow the IngestionPipeline
+    # to be the single source of truth for processing, which is crucial when
+    # the vector store is cleared on restart.
+
     upload_dir = settings.UPLOAD_PATH
 
     async def process_file(file: UploadFile):
@@ -97,6 +105,22 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
 
     logger.info("Batch processing complete.")
     return results
+
+@router.post("/evaluate")
+async def evaluate_logs():
+    """
+    Triggers a batch evaluation of the output logs using RAGas.
+    """
+    try:
+        logger.info("Received request to start RAGas batch evaluation.")
+        evaluator = RagasEvaluator()
+        result = evaluator.run_evaluation()
+        logger.info("RAGas batch evaluation completed successfully.")
+        return result
+    except Exception as e:
+        logger.error(f"Error during RAGas batch evaluation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred during evaluation: {str(e)}")
+
 
 # --- Feedback Endpoint (Future Scope) ---
 # class FeedbackRequest(BaseModel):

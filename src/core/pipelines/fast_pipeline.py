@@ -55,8 +55,10 @@ class FastPipeline(Pipeline):
         context = ""
         retrieved_nodes = []
 
-        if retrieval_strategy == 'graph':
-            graph_context = await self.graph_retriever.retrieve(query, model=query_analysis['strategy'].model)
+        # A hybrid strategy involves using the graph retriever first.
+        if retrieval_strategy == 'hybrid':
+            logger.info("Hybrid strategy detected. Attempting graph retrieval first.")
+            graph_context = await self.graph_retriever.retrieve(query)
             if graph_context:
                 context = graph_context
                 # Create a dummy node for citation purposes
@@ -64,6 +66,16 @@ class FastPipeline(Pipeline):
                     NodeWithScore(node=TextNode(text=graph_context, id_="graph_context", metadata={"file_path": "Knowledge Graph"}), score=1.0)
                 ]
                 retrieved_nodes = self._format_nodes_to_docs(retrieved_nodes_with_score)
+            else:
+                logger.info("Graph retrieval yielded no results. Falling back to vector retrieval.")
+                retrieved_nodes_with_score = self.retriever.retrieve(
+                    query,
+                    top_k=query_analysis['strategy'].top_k
+                )
+                if retrieved_nodes_with_score:
+                    context = self._construct_context_from_nodes(retrieved_nodes_with_score)
+                    retrieved_nodes = self._format_nodes_to_docs(retrieved_nodes_with_score)
+        
         else: # Default to vector retrieval
             retrieved_nodes_with_score = self.retriever.retrieve(
                 query,

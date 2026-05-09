@@ -53,8 +53,8 @@ class IntelligentPDFRouter(Loader):
                 normalized_elements.extend(table_elements)
                 # Re-sort elements by page and vertical position to ensure correct final order
                 normalized_elements.sort(key=lambda el: (
-                    el.metadata.get("page_num", 0),
-                    el.metadata.get("bbox", (0, 0, 0, 0))[1]
+                    getattr(el.metadata, "page_number", 0),
+                    getattr(el.metadata, "bbox", (0, 0, 0, 0))[1]
                 ))
             
             logger.info("--- Tier 1: Advanced PyMuPDF Extraction Successful ---")

@@ -25,7 +25,7 @@ class KeywordRetriever:
         self.bm25 = BM25Okapi(tokenized_corpus)
         logger.info(f"BM25 model updated with a corpus of {len(corpus)} documents.")
 
-    def retrieve(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def retrieve(self, query: str, top_k: int = 5) -> List[NodeWithScore]:
         """
         Retrieves the top_k most relevant documents for a given query
         using BM25.
@@ -43,12 +43,11 @@ class KeywordRetriever:
         
         results = []
         for i in top_n_indices:
-            node = self.all_nodes[i]
-            results.append({
-                "node": node,
-                "score": doc_scores[i],
-                "source": node.metadata.get("source", "Unknown")
-            })
+            # Ensure the score is a float, as BM25 can return numpy types
+            score = float(doc_scores[i])
+            if score > 0: # Only return documents with a positive score
+                node = self.all_nodes[i]
+                results.append(NodeWithScore(node=node, score=score))
             
-        logger.info(f"Retrieved {len(results)} documents for query.")
+        logger.info(f"Retrieved {len(results)} documents with positive scores for query.")
         return results

@@ -178,13 +178,16 @@ class ConfidenceEngine:
         """Decides an action based only on the initial context confidence."""
         score = context_confidence.get("context_score", 0.0)
         
+        # If we have already tried to expand the context, we should generate a response
+        # regardless of the score to avoid getting into an expansion loop.
+        if is_post_expansion:
+            return "generate"
+        
         # Use simpler thresholds for this initial decision
         if score >= 0.7:
             return "generate"
-        elif score >= 0.5 and not is_post_expansion:
+        elif score >= 0.5:
             return "expand"
-        elif is_post_expansion: # If score is still low after expansion, generate anyway and hope for the best
-            return "generate"
         else:
             return "expand"
 

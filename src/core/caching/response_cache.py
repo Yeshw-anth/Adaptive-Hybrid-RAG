@@ -16,7 +16,7 @@ class ResponseCache:
     will not return a stale answer.
     """
 
-    def __init__(self, cache_dir: str = settings.CACHE_DIR, ttl: int = 3600 * 24 * 7):
+    def __init__(self, cache_dir: str = settings.CACHE_PATH, ttl: int = 3600 * 24 * 7):
         """
         Initializes the response cache.
 

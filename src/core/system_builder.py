@@ -1,4 +1,6 @@
 from src.core.logging_config import logger
+import os
+import shutil
 import faiss
 from llama_index.core import (
     VectorStoreIndex,
@@ -7,7 +9,6 @@ from llama_index.core import (
 )
 from llama_index.vector_stores.faiss import FaissVectorStore
 
-from src.config.settings import settings
 from src.data.embedding.embedder import Embedder
 from src.core.llm.ollama_client import OllamaClient
 from src.core.retrieval.retriever import Retriever
@@ -39,6 +40,7 @@ from src.core.caching.response_cache import ResponseCache
 from src.core.orchestrator import RAGOrchestrator
 from src.core.graph.graph_builder import KnowledgeGraphBuilder
 from src.core.retrieval.graph_retriever import GraphRetriever
+from src.core.graph.graph_store import NetworkxGraphStore
 from src.core.retrieval.hybrid_graph_retriever import HybridGraphRetriever
 
 
@@ -52,13 +54,46 @@ class SystemBuilder:
         self.components = {}
 
     def shutdown(self):
-        """Handles graceful shutdown of components, like persisting indexes."""
+        """Handles graceful shutdown of components, like persisting indexes, using atomic operations."""
         logger.info("--- Starting System Shutdown ---")
-        vector_store = self.components.get('vector_store')
-        if vector_store:
-            faiss_index_path = self.settings.PERSIST_PATH / "faiss_index.bin"
-            logger.info(f"Persisting Faiss index to: {faiss_index_path}")
-            vector_store.persist(persist_path=str(faiss_index_path))
+
+        # 1. Persist the vector index atomically
+        vector_index = self.components.get('vector_index')
+        if vector_index:
+            persist_dir = self.settings.VECTOR_STORE_PATH
+            temp_dir = persist_dir.with_suffix('.tmp')
+            logger.info(f"Attempting to atomically persist index to: {persist_dir}")
+
+            try:
+                # Step 1: Persist to a temporary directory
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir) # Ensure clean state
+                vector_index.storage_context.persist(persist_dir=str(temp_dir))
+                logger.info(f"Successfully persisted index to temporary directory: {temp_dir}")
+
+                # Step 2: Atomically replace the old directory with the new one
+                if persist_dir.exists():
+                    shutil.rmtree(persist_dir)
+                
+                os.rename(temp_dir, persist_dir)
+                
+                logger.info(f"Successfully and atomically persisted index to {persist_dir}")
+
+            except Exception as e:
+                logger.error(f"Failed to atomically persist vector index: {e}", exc_info=True)
+                # If anything goes wrong, try to clean up the temporary directory
+                if temp_dir.exists():
+                    try:
+                        shutil.rmtree(temp_dir)
+                        logger.warning(f"Cleaned up failed temporary persistence directory: {temp_dir}")
+                    except Exception as cleanup_e:
+                        logger.error(f"FATAL: Failed to clean up temporary directory {temp_dir}: {cleanup_e}")
+
+        # 2. Persist the graph store (which now has its own atomic save)
+        graph_store = self.components.get('graph_store')
+        if graph_store:
+            graph_store.shutdown()
+            
         logger.info("--- System Shutdown Complete ---")
 
     def build_all(self):
@@ -68,6 +103,7 @@ class SystemBuilder:
         self._build_rag_components()
         self._build_pipelines()
         self._build_orchestrator()
+        self.components['rag_orchestrator'].load_and_sync_retrievers()
         logger.info("--- System Build Complete ---")
         
         return (
@@ -81,30 +117,32 @@ class SystemBuilder:
         logger.info("Building core infrastructure...")
         
         # Ensure base directories exist
-        self.settings.PERSIST_PATH.mkdir(parents=True, exist_ok=True)
+        self.settings.VECTOR_STORE_PATH.mkdir(parents=True, exist_ok=True)
         self.settings.CACHE_PATH.mkdir(parents=True, exist_ok=True)
         self.settings.UPLOAD_PATH.mkdir(parents=True, exist_ok=True)
         self.settings.IMAGE_OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
         llm_client = OllamaClient()
         embedder = Embedder(model_name=self.settings.EMBED_MODEL_NAME)
+        graph_store = NetworkxGraphStore(graph_path=self.settings.GRAPH_FILE_PATH)
 
         try:
-            logger.info(f"Attempting to load existing index from: {self.settings.PERSIST_PATH}")
-            # Check if the directory is empty or not a valid index
-            if not any(self.settings.PERSIST_PATH.iterdir()):
+            logger.info(f"Attempting to load existing index from: {self.settings.VECTOR_STORE_PATH}")
+            if not any(self.settings.VECTOR_STORE_PATH.iterdir()):
                 raise ValueError("Storage directory is empty.")
 
-            storage_context = StorageContext.from_defaults(persist_dir=str(self.settings.PERSIST_PATH))
+            storage_context = StorageContext.from_defaults(persist_dir=str(self.settings.VECTOR_STORE_PATH))
+            vector_store = FaissVectorStore.from_persist_dir(str(self.settings.VECTOR_STORE_PATH))
+            
             vector_index = load_index_from_storage(
                 storage_context=storage_context,
                 embed_model=embedder
             )
-            vector_store = storage_context.vector_store
             faiss_index = vector_store.client
-            logger.info("Successfully loaded existing index.")
-        except (ValueError, FileNotFoundError):
-            logger.warning("Failed to load existing index or directory is empty. Creating a new one.")
+            logger.info(f"Successfully loaded existing index with {faiss_index.ntotal} vectors.")
+
+        except (ValueError, FileNotFoundError, RuntimeError) as e:
+            logger.warning(f"Failed to load existing index ({e}). Creating a new one.")
             faiss_index = faiss.IndexFlatL2(self.settings.EMBEDDING_DIM)
             vector_store = FaissVectorStore(faiss_index=faiss_index)
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
@@ -123,7 +161,8 @@ class SystemBuilder:
             'llm_client': llm_client,
             'embedder': embedder,
             'vector_store': vector_store,
-            'vector_index': vector_index
+            'vector_index': vector_index,
+            'graph_store': graph_store
         })
         logger.info("Core infrastructure built.")
 
@@ -138,12 +177,13 @@ class SystemBuilder:
         keyword_retriever = KeywordRetriever(all_docs)
         hybrid_retriever = HybridRetriever(retriever, all_docs)
         graph_retriever = GraphRetriever()
+        hybrid_graph_retriever = HybridGraphRetriever(retriever, graph_retriever)
 
         # Reranker
         reranker = CrossEncoderReranker()
 
         # Query Processors
-        query_analyzer = QueryAnalyzer(c['llm_client'])
+        query_analyzer = QueryAnalyzer(c['llm_client'], self.settings.DEFAULT_LLM_MODEL)
         query_expander = QueryExpander(c['llm_client'])
         cost_latency_controller = CostLatencyController()
         strategy_router = StrategyRouter(cost_latency_controller)
@@ -155,8 +195,10 @@ class SystemBuilder:
         # Ingestion
         ingestion_pipeline = IngestionPipeline(
             chunking_engine=chunking_engine,
-            graph_builder=KnowledgeGraphBuilder(llm_client=c['llm_client']),
-            llm_client=c['llm_client']
+            graph_builder=KnowledgeGraphBuilder(llm_client=c['llm_client'], graph_store=c['graph_store']),
+            llm_client=c['llm_client'],
+            graph_store=c['graph_store'],
+            vector_index=c['vector_index']
         )
 
         self.components.update({
@@ -164,6 +206,7 @@ class SystemBuilder:
             'keyword_retriever': keyword_retriever,
             'hybrid_retriever': hybrid_retriever,
             'graph_retriever': graph_retriever,
+            'hybrid_graph_retriever': hybrid_graph_retriever,
             'reranker': reranker,
             'query_analyzer': query_analyzer,
             'query_expander': query_expander,
@@ -214,6 +257,7 @@ class SystemBuilder:
         accurate_pipeline = AccuratePipeline(
             retriever=c['retriever'],
             hybrid_retriever=c['hybrid_retriever'],
+            hybrid_graph_retriever=c['hybrid_graph_retriever'],
             reranker=c['reranker'],
             llm_client=c['llm_client'],
             query_expander=c['query_expander'],

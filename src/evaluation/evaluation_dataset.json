@@ -1,20 +1,10 @@
 [
     {
-        "query": "What is the main objective of the IAM Solution Design Proposal?",
-        "ground_truth_answer": "The main objective of the IAM Solution Design Proposal is to outline a comprehensive Identity and Access Management (IAM) solution for TechCorp, focusing on enhancing security, improving operational efficiency, and ensuring regulatory compliance.",
-        "expected_doc_id": "IAM Solution Design Proposal.docx_chunk_0",
-        "query_type": "factual"
+        "NOTE": "This is a sample evaluation dataset. For a meaningful evaluation of the RAG system, replace the sample questions and answers below with your own domain-specific data.",
+        "instructions": "Add your own question-and-answer pairs to measure the performance of the system on your own documents."
     },
     {
-        "query": "What are the key components of the proposed IAM solution?",
-        "ground_truth_answer": "The key components of the proposed IAM solution include Single Sign-On (SSO), Multi-Factor Authentication (MFA), User Lifecycle Management, and Privileged Access Management (PAM).",
-        "expected_doc_id": "IAM Solution Design Proposal.docx_chunk_1",
-        "query_type": "factual"
-    },
-    {
-        "query": "What is the timeline for the TechCorp IAM implementation?",
-        "ground_truth_answer": "The TechCorp IAM implementation is planned in three phases over a period of 12 months. Phase 1 (Months 1-3) focuses on core infrastructure setup. Phase 2 (Months 4-8) involves the rollout of SSO and MFA. Phase 3 (Months 9-12) will implement User Lifecycle Management and PAM.",
-        "expected_doc_id": "TechCorp_IAM_Implementation_Plan.pptx_chunk_0",
-        "query_type": "factual"
+        "query": "how Online Semi-Supervised Learning helps in adaptive machine learning systems?",
+        "ground_truth_answer": "Online semi-supervised learning (SSL) helps adaptive machine learning systems by allowing them to learn from a small amount of labeled data and a large amount of unlabeled data in real-time. This is particularly useful in dynamic environments where data distributions change, as the model can continuously adapt and improve its performance without needing extensive manual labeling. It combines the benefits of supervised learning (accuracy from labeled data) and unsupervised learning (scalability with unlabeled data) in an online setting."
     }
 ]

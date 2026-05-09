@@ -27,36 +27,43 @@ class InterceptHandler(logging.Handler):
 
 # --- Centralized Logging Configuration ---
 
-# 1. We start by removing the default handler to ensure a clean slate.
-logger.remove()
-
-# 2. Add a new, clean console handler.
-logger.add(
-    sys.stdout,
-    level=settings.LOG_LEVEL.upper(),
-    format=settings.LOG_FORMAT_CONSOLE,
-    colorize=True,
-    backtrace=True,
-    diagnose=True
-)
-
-# 3. Add a file handler for persistent, structured logging.
+# Ensure the log directory exists
 log_file = settings.LOG_FILE_PATH
 log_file.parent.mkdir(parents=True, exist_ok=True)
-logger.add(
-    log_file,
-    level=settings.LOG_LEVEL.upper(),
-    format=settings.LOG_FORMAT_FILE,
-    rotation=settings.LOG_ROTATION,
-    retention=settings.LOG_RETENTION,
-    compression="zip",
-    enqueue=True,  # Make file logging asynchronous
-    backtrace=True,
-    diagnose=True
+
+# Define the configuration for all handlers
+handlers = [
+    {
+        "sink": sys.stdout,
+        "level": settings.LOG_LEVEL.upper(),
+        "format": settings.LOG_FORMAT_CONSOLE,
+        "colorize": True,
+        "backtrace": True,
+        "diagnose": True,
+    },
+    {
+        "sink": log_file,
+        "level": settings.LOG_LEVEL.upper(),
+        "format": settings.LOG_FORMAT_FILE,
+        "rotation": settings.LOG_ROTATION,
+        "retention": settings.LOG_RETENTION,
+        "compression": "zip",
+        "enqueue": True,  # Make file logging asynchronous
+        "backtrace": True,
+        "diagnose": True,
+    },
+]
+
+# Configure the logger in one go. This replaces all existing handlers.
+# The patcher ensures that a 'query_id' is always present in the 'extra' dict.
+logger.configure(
+    handlers=handlers,
+    patcher=lambda record: record["extra"].setdefault("query_id", "System"),
 )
 
-# 4. Intercept standard logging to redirect logs from other libraries (like huggingface)
-#    to our configured Loguru sink. This prevents double logging.
+
+# Intercept standard logging to redirect logs from other libraries (like huggingface)
+# to our configured Loguru sink. This prevents double logging.
 logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
 
 logger.info(f"Logger configured: Level={settings.LOG_LEVEL}, Directory={settings.LOG_DIR}")

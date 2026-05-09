@@ -16,7 +16,7 @@ from src.core.strategy.query_expander import QueryExpander
 from src.core.decision.confidence_engine import ConfidenceEngine
 from src.core.caching.response_cache import ResponseCache
 
-from src.config import settings
+from src.config.settings import settings
 
 class AccuratePipeline(Pipeline):
     """
@@ -24,10 +24,11 @@ class AccuratePipeline(Pipeline):
     confidence-driven expansion loop to provide high-quality answers.
     """
 
-    def __init__(self, retriever: Retriever, hybrid_retriever: HybridRetriever, reranker: CrossEncoderReranker,
+    def __init__(self, retriever: Retriever, hybrid_retriever: HybridRetriever, hybrid_graph_retriever: HybridGraphRetriever, reranker: CrossEncoderReranker,
                  llm_client: OllamaClient, query_expander: QueryExpander, confidence_engine: ConfidenceEngine):
         self.retriever = retriever
         self.hybrid_retriever = hybrid_retriever
+        self.hybrid_graph_retriever = hybrid_graph_retriever
         self.reranker = reranker
         self.llm_client = llm_client
         self.query_expander = query_expander
@@ -100,7 +101,7 @@ class AccuratePipeline(Pipeline):
         final_docs_as_dicts = self._format_nodes_to_docs(final_docs_for_context)
         
         # Use fused context if available (from hybrid_graph retriever)
-        if "full_result" in retrieval_result and "fused_context" in retrieval_result["full_result"]:
+        if "full_result" in retrieval_result and isinstance(retrieval_result["full_result"], dict) and "fused_context" in retrieval_result["full_result"]:
             context = retrieval_result["full_result"]["fused_context"]
         # Use direct graph context if available (from graph_native retriever)
         elif "graph_context" in retrieval_result:
@@ -115,6 +116,8 @@ class AccuratePipeline(Pipeline):
         except Exception as e:
             logger.error(f"Error during LLM generation in AccuratePipeline: {e}")
             return self._format_error_response(str(e), start_time, strategy, query_metadata)
+
+        logger.info(f"LLM_RAW_RESPONSE: {answer}")
 
 
         response = self._format_response(
@@ -182,6 +185,7 @@ class AccuratePipeline(Pipeline):
         retrieval_start = time.time()
         retrieval_strategy = strategy.retrieval_strategy
         depth = strategy.top_k
+        retrieval_result = None
 
         if retrieval_strategy == 'graph_native':
             from src.core.retrieval.graph_retriever import GraphRetriever
@@ -193,11 +197,11 @@ class AccuratePipeline(Pipeline):
         if retrieval_strategy == 'hybrid':
             retrieved_nodes = self.hybrid_retriever.retrieve(query, top_k=depth, filters=filters)
             if not retrieved_nodes:
-                logger.warning("Hybrid retrieval failed. Falling back to vector retrieval.")
-                retrieved_nodes = self.retriever.retrieve(query, top_k=depth, filters=filters)
+               logger.warning("Hybrid retrieval failed. Falling back to vector retrieval.")
+
         elif retrieval_strategy == 'hybrid_graph':
-            retrieval_result = await self.hybrid_graph_retriever.retrieve(query, model=model, top_k=depth)
-            retrieved_nodes = retrieval_result["vector_docs"]
+            retrieval_result = await self.hybrid_graph_retriever.retrieve(query, top_k=depth)
+            retrieved_nodes = retrieval_result
             # The graph context is handled separately in the main execute method
         else:
             retrieved_nodes = self.retriever.retrieve(query, top_k=depth, filters=filters)
@@ -256,7 +260,7 @@ class AccuratePipeline(Pipeline):
             all_expanded_nodes = []
             for eq in expanded_queries:
                 if eq != query:
-                    retrieval_result = self._retrieve_docs(eq, strategy, filters=initial_filters)
+                    retrieval_result = await self._retrieve_docs(eq, strategy, model=strategy.model, filters=initial_filters)
                     all_expanded_nodes.extend(retrieval_result["docs"])
             expansion_details["retrieval_time"] = time.time() - expand_retrieval_start
 
@@ -364,8 +368,8 @@ class AccuratePipeline(Pipeline):
             "final_docs": [],
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_metadata.dict(),
-            "strategy": strategy.dict(),
+            "query_metadata": query_metadata.model_dump(),
+            "strategy": strategy.model_dump(),
             "pipeline": "accurate",
         }
 
@@ -378,8 +382,8 @@ class AccuratePipeline(Pipeline):
             "final_docs": decision_result.get("final_docs", []),
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_metadata.dict(),
-            "strategy": strategy.dict(),
+            "query_metadata": query_metadata.model_dump(),
+            "strategy": strategy.model_dump(),
             "pipeline": "accurate",
             "confidence": decision_result["confidence"],
             "action_taken": "abstain"
@@ -396,16 +400,19 @@ class AccuratePipeline(Pipeline):
         query_metadata: Optional[QueryMetadata] = kwargs.get("query_metadata")
         strategy: Optional[Strategy] = kwargs.get("strategy")
 
+        raw_answer = kwargs.get("answer", {})
+        answer_content = raw_answer.get("content", "") if isinstance(raw_answer, dict) else raw_answer
+
         return {
-            "answer": kwargs.get("answer"),
+            "answer": answer_content,
             "sources": kwargs.get("sources"),
             "retrieved_docs": kwargs.get("retrieved_docs", []),
             "reranked_docs": kwargs.get("reranked_docs", []),
             "final_docs": kwargs.get("final_docs", []),
             "context": kwargs.get("context", ""),
             "latency": kwargs.get("latency"),
-            "query_metadata": query_metadata.dict() if query_metadata else {},
-            "strategy": strategy.dict() if strategy else {},
+            "query_metadata": query_metadata.model_dump() if query_metadata else {},
+            "strategy": strategy.model_dump() if strategy else {},
             "query_type": query_metadata.query_type if query_metadata else "unknown", # For convenience
             "pipeline": kwargs.get("pipeline"),
             "confidence_score": confidence_score,
@@ -421,7 +428,7 @@ class AccuratePipeline(Pipeline):
             "final_docs": [],
             "context": "",
             "latency": time.time() - start_time,
-            "query_metadata": query_metadata.dict(),
-            "strategy": strategy.dict(),
+            "query_metadata": query_metadata.model_dump(),
+            "strategy": strategy.model_dump(),
             "pipeline": "accurate",
         }

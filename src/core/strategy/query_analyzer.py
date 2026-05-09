@@ -32,8 +32,9 @@ class QueryAnalyzer:
     that encourages chain-of-thought reasoning to select the best strategy.
     """
 
-    def __init__(self, llm_wrapper: OllamaClient, max_retries: int = 2):
+    def __init__(self, llm_wrapper: OllamaClient, default_llm_model: str, max_retries: int = 2):
         self.llm_wrapper = llm_wrapper
+        self.default_llm_model = default_llm_model
         self.max_retries = max_retries
         self.last_error = ""
         self.system_prompt = """You are an expert query analyzer for an advanced RAG system. Your task is to analyze the user's query, reason about the best strategy, and then output a single, valid JSON object.
@@ -92,7 +93,7 @@ Respond with ONLY the corrected JSON object inside a `json` block.
         """
         Analyzes the query using a sophisticated LLM chain-of-thought prompt.
         """
-        model_to_use = model_override or settings.DEFAULT_LLM_MODEL
+        model_to_use = model_override or self.default_llm_model
         
         # This prompt is now much more detailed and guides the LLM better.
         user_prompt = self.user_prompt_template.format(
@@ -193,13 +194,18 @@ Respond with ONLY the corrected JSON object inside a `json` block.
             # First attempt to parse directly
             return json.loads(json_str)
         except json.JSONDecodeError as e:
-            logger.warning(f"Initial JSON parsing failed: {e}. Attempting to fix...")
-            # Attempt to fix common errors (e.g., trailing commas, single quotes)
-            # This is a simple fix; more complex ones could be added.
-            fixed_json_str = json_str.replace("'", '"').rstrip().rstrip(',')
-            # Try to re-parse after fixing
+            logger.warning(f"Initial JSON parsing failed: {e}. Attempting to fix common errors...")
+            
+            # 1. Replace single quotes with double quotes
+            fixed_str = json_str.replace("'", '"')
+            
+            # 2. Remove trailing commas from objects and arrays
+            # This regex finds commas that are followed by only whitespace and then a } or ]
+            fixed_str = re.sub(r',\s*([}\]])', r'\1', fixed_str)
+            
             try:
-                return json.loads(fixed_json_str)
+                # Retry parsing with the fixed string
+                return json.loads(fixed_str)
             except json.JSONDecodeError:
                 logger.error("Failed to parse JSON even after attempting to fix it.")
-                raise # Re-raise the original error to be caught by the main loop
+                raise  # Re-raise the original error to be caught by the main loop

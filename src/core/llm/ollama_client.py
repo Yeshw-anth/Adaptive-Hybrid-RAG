@@ -21,7 +21,7 @@ class OllamaClient:
             A dictionary containing 'content' and 'token_usage'.
         """
         try:
-            client = ollama.AsyncClient()
+            client = ollama.AsyncClient(timeout=300)
             response = await client.chat(
                 model=model, messages=messages, options=options
             )
@@ -100,7 +100,7 @@ class OllamaClient:
             {'role': 'user', 'content': user_prompt}
         ]
         options = {
-            "num_predict": 1024,
+            "num_predict": 1200,
             "temperature": 0.1,
         }
         return await self._generate(model=model, messages=messages, options=options)
@@ -113,7 +113,7 @@ class OllamaClient:
         Returns a dictionary with 'content' and 'token_usage'.
         """
         messages = [{'role': 'user', 'content': prompt}]
-        options = {"num_predict": 256, "temperature": 0.2, "top_p": 0.9}
+        options = {"num_predict": 1200, "temperature": 0.2, "top_p": 0.9}
         return await self._generate(model=model, messages=messages, options=options)
 
     async def generate_with_image(
@@ -137,7 +137,7 @@ class OllamaClient:
             }
         ]
         options = {
-            "num_predict": 1024,
+            "num_predict": 1200,
             "temperature": 0.1,
         }
         return await self._generate(model=model, messages=messages, options=options)
@@ -147,12 +147,11 @@ class OllamaClient:
     def clean_json_response(self, response_text: str) -> str:
         """
         Cleans the raw text response from an LLM to extract a valid JSON object or array.
-        This function is designed to be robust against conversational text surrounding the JSON.
+        This function is designed to be robust against conversational text surrounding the JSON
+        and common malformations like extra commas.
         """
         # Attempt to find a JSON object or array using a regular expression
-        # This regex looks for a string starting with '{' or '[' and ending with '}' or ']'
-        # It handles nested structures.
-        match = re.search(r'(\[.*?\].*?|\{.*?\}.*?)', response_text, re.DOTALL)
+        match = re.search(r'(\[.*?\]|\{.*?\})', response_text, re.DOTALL)
 
         if not match:
             logger.error("Could not find a JSON object or array in the response.")
@@ -160,11 +159,17 @@ class OllamaClient:
 
         json_str = match.group(0)
 
-        # Further clean up to remove potential markdown code blocks
+        # Remove markdown code blocks
         if json_str.startswith("```json"):
             json_str = json_str[7:]
         if json_str.endswith("```"):
             json_str = json_str[:-3]
+        
+        # Fix common LLM malformations, like leading commas in lists
+        # e.g., `[,"foo", "bar"]` -> `["foo", "bar"]`
+        json_str = re.sub(r'\[\s*,\s*', '[', json_str)
+        json_str = re.sub(r',\s*,\s*', ',', json_str)
+
 
         # Validate that the extracted string is valid JSON
         try:
@@ -172,4 +177,4 @@ class OllamaClient:
             return json_str
         except json.JSONDecodeError as e:
             logger.error(f"Extracted string is not valid JSON: {json_str}", exc_info=True)
-            raise ValueError(f"Extracted string could not be parsed as JSON: {e}")
+            raise ValueError(f"Extracted string could not be parsed as JSON: {e}\nResponse: '{response_text}'")

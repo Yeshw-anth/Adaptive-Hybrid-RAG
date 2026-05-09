@@ -47,6 +47,7 @@ class Document(BaseModel):
     score: float | None = Field(default=None, description="The relevance score of the document.")
 
 class OutputLog(BaseModel):
+    query_id: str
     query: str
     query_metadata: QueryMetadata
     selected_strategy: Strategy
@@ -60,3 +61,8 @@ class OutputLog(BaseModel):
     action_taken: str | None = None
     expansion_triggered: bool = False
     timestamp: str
+    # RAGas metrics
+    faithfulness: float | None = None
+    answer_relevancy: float | None = None
+    context_precision: float | None = None
+    context_recall: float | None = None
