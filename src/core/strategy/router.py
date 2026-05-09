@@ -1,9 +1,8 @@
-import logging
-from src.config import settings
+from src.core.logging_config import logger
+from src.config.settings import settings
 from src.data.schemas import QueryMetadata, Strategy
 from src.core.decision.cost_latency_controller import CostLatencyController
-
-logger = logging.getLogger(__name__)
+from typing import Optional
 
 class StrategyRouter:
     """
@@ -13,7 +12,15 @@ class StrategyRouter:
     def __init__(self, cost_latency_controller: CostLatencyController):
         self.cost_latency_controller = cost_latency_controller
 
-    def select_strategy(self, query_metadata: QueryMetadata, model_override: str = None) -> Strategy:
+
+
+        self.strategy_levels = [
+            {"model": settings.LARGE_LLM_MODEL, "use_reranker": True, "retrieval_strategy": "hybrid", "top_k": 12},
+            {"model": settings.DEFAULT_LLM_MODEL, "use_reranker": True, "retrieval_strategy": "hybrid", "top_k": 10},
+            {"model": settings.SMALL_LLM_MODEL, "use_reranker": False, "retrieval_strategy": "vector", "top_k": 8},
+        ]
+
+    def select_strategy(self, query_metadata: QueryMetadata, model_override: Optional[str] = None) -> Strategy:
         """
         Determines the best strategy by starting with a balanced default, applying
         rules, and then adjusting for cost/latency budget.
@@ -30,10 +37,15 @@ class StrategyRouter:
         logger.info(f"Strategy after applying rules: {strategy_params}")
 
         # 3. Adjust strategy based on cost/latency budget (Upgrade or Downgrade)
-        final_strategy = self._adjust_for_budget(strategy_params, query_metadata, model_override)
+        strategy = self._adjust_for_budget(strategy_params, query_metadata)
 
-        logger.info(f"Final Tuned Strategy: {final_strategy.model_dump_json(indent=2)}")
-        return final_strategy
+        # 4. Apply model_override if provided (for testing or explicit control)
+        if model_override:
+            logger.info(f"Applying model_override: '{model_override}'.")
+            strategy.model = model_override
+
+        logger.info(f"Final Tuned Strategy: {strategy.model_dump_json(indent=2)}")
+        return strategy
 
     def get_default_accurate_strategy(self) -> Strategy:
         """
@@ -74,7 +86,7 @@ class StrategyRouter:
             "pipeline": "accurate",
             "retrieval_strategy": "vector", # Start with vector, can be upgraded
             "use_reranker": False,          # Start without reranker, can be upgraded
-            "model": settings.SMALL_LLM_MODEL, # Start with small model, can be upgraded
+            "model": settings.DEFAULT_LLM_MODEL, # Start with small model, can be upgraded
             "top_k": 8
         }
 
@@ -122,64 +134,28 @@ class StrategyRouter:
             
         return params
 
-    def _adjust_for_budget(self, strategy_params: dict, query_metadata: QueryMetadata, model_override: str = None) -> Strategy:
+    def _adjust_for_budget(self, strategy_params: dict, query_metadata: QueryMetadata) -> Strategy:
         """
-        Checks a strategy against the budget and iteratively adjusts it.
-        It can upgrade features if there is budget, or downgrade if it's too expensive.
+        Adjusts the strategy by finding the best possible configuration that fits
+        within the budget. It iterates through a predefined sequence of strategies
+        from most to least capable, handling both upgrades and downgrades.
         """
         query_dict = query_metadata.model_dump()
 
-        if model_override:
-            logger.info(f"Model override is active. Locking model to {model_override}.")
-            strategy_params["model"] = model_override
+        logger.info("Searching for the best strategy within budget by iterating through defined levels...")
 
-        # --- Attempt to UPGRADE if budget allows ---
-        upgrade_steps = [
-            ("model", settings.LARGE_LLM_MODEL),
-            ("use_reranker", True),
-            ("retrieval_strategy", "hybrid"),
-        ]
-        
-        current_strategy = strategy_params.copy()
-        logger.info("Checking for potential upgrades...")
-        for feature, upgraded_value in upgrade_steps:
-            if feature == "model" and model_override:
-                logger.info("Skipping model upgrade due to override.")
-                continue
-            if current_strategy.get(feature) != upgraded_value:
-                potential_upgrade = current_strategy.copy()
-                potential_upgrade[feature] = upgraded_value
-                if self.cost_latency_controller.is_within_budget(potential_upgrade, query_dict):
-                    logger.info(f"Upgrade successful: Setting '{feature}' to '{upgraded_value}'.")
-                    current_strategy = potential_upgrade
-                else:
-                    logger.info(f"Cannot afford to upgrade '{feature}'.")
+        # Find the first (and therefore best) strategy that fits the budget.
+        for level in self.strategy_levels:
+            # Create a candidate by taking the pipeline from the previous step and applying the current level's settings.
+            candidate_params = strategy_params.copy()
+            candidate_params.update(level)
 
-        # If the (potentially upgraded) strategy is within budget, we are done.
-        if self.cost_latency_controller.is_within_budget(current_strategy, query_dict):
-            logger.info("Final strategy is within budget.")
-            return Strategy(**current_strategy)
+            if self.cost_latency_controller.is_within_budget(candidate_params, query_dict):
+                logger.info(f"Found best-fit strategy: {candidate_params}")
+                return Strategy(**candidate_params)
 
-        # --- If not, DOWNGRADE from the last working (or initial) config ---
-        logger.warning("Strategy exceeds budget. Attempting to downgrade.")
-        
-        downgrade_steps = [
-            ("model", settings.SMALL_LLM_MODEL),
-            ("use_reranker", False),
-            ("retrieval_strategy", "vector"),
-        ]
-
-        for feature, downgraded_value in downgrade_steps:
-            if feature == "model" and model_override:
-                logger.info("Skipping model downgrade due to override.")
-                continue
-            if current_strategy.get(feature) != downgraded_value:
-                logger.info(f"Downgrade Step: Setting '{feature}' to '{downgraded_value}'.")
-                current_strategy[feature] = downgraded_value
-                if self.cost_latency_controller.is_within_budget(current_strategy, query_dict):
-                    logger.info("Downgraded strategy now fits within budget.")
-                    return Strategy(**current_strategy)
-        
-        logger.error("Could not find a strategy that fits the budget, even after all downgrades.")
-        # Return the most-downgraded version as a last resort
-        return Strategy(**current_strategy)
+        # If no strategy fits the budget, fall back to the absolute cheapest one as a last resort.
+        logger.warning("No defined strategy level fits within the budget. Falling back to the cheapest possible strategy.")
+        cheapest_params = strategy_params.copy()
+        cheapest_params.update(self.strategy_levels[-1])
+        return Strategy(**cheapest_params)

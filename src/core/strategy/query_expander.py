@@ -1,10 +1,8 @@
-import logging
+from src.core.logging_config import logger
 from typing import List
 
 from src.core.llm.ollama_client import OllamaClient
 from src.data.schemas import QueryMetadata
-
-logger = logging.getLogger(__name__)
 
 class QueryExpander:
     """
@@ -57,11 +55,18 @@ Alternative Queries:
             keywords=", ".join(query_metadata.keywords),
             expected_answer_format=query_metadata.expected_answer_format
         )
-        response = await self.llm_wrapper.generate_from_prompt(prompt)
+        response_data = await self.llm_wrapper.generate_from_prompt(prompt)
+        response_content = response_data["content"]
+        token_usage = response_data["token_usage"]
+
+        logger.info(
+            f"Query expansion LLM call successful. "
+            f"Token usage: {token_usage['input_tokens']} (in), {token_usage['output_tokens']} (out)."
+        )
         
         # Strict parsing to remove junk lines and numbering
         queries = []
-        for line in response.split("\n"):
+        for line in response_content.split("\n"):
             line = line.strip()
             if not line:
                 continue

@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any
 from llama_index.core import VectorStoreIndex
 from llama_index.core.schema import NodeWithScore
@@ -28,7 +28,7 @@ class Retriever:
                                                 Example: {"section_title": "Skills"}
 
         Returns:
-            List[Dict[str, Any]]: A list of retrieved chunk documents with their scores.
+            List[NodeWithScore]: A list of retrieved nodes with their scores.
         """
         if not query:
             return []
@@ -40,11 +40,11 @@ class Retriever:
 
         # Retrieve nodes (without filters at the DB level)
         retrieved_nodes: List[NodeWithScore] = index_retriever.retrieve(query)
-        logging.info(f"Retrieved {len(retrieved_nodes)} initial nodes from Faiss.")
+        logger.debug(f"Retrieved {len(retrieved_nodes)} initial nodes from Faiss.")
 
         # In-memory filtering if filters are provided
         if filters:
-            logging.info(f"Applying in-memory metadata filters: {filters}")
+            logger.debug(f"Applying in-memory metadata filters: {filters}")
             filtered_nodes = []
             for node in retrieved_nodes:
                 matches = all(node.node.metadata.get(key) == value for key, value in filters.items())
@@ -52,7 +52,7 @@ class Retriever:
                     filtered_nodes.append(node)
 
             retrieved_nodes = filtered_nodes
-            logging.info(f"Found {len(retrieved_nodes)} nodes after in-memory filtering.")
+            logger.info(f"Found {len(retrieved_nodes)} nodes after in-memory filtering.")
 
         # Trim to the desired top_k after filtering
         final_nodes = retrieved_nodes[:top_k]

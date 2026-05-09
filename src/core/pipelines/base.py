@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from llama_index.core.schema import NodeWithScore
 from src.core.caching.response_cache import ResponseCache
-import logging
+from src.core.logging_config import logger
 
 class Pipeline(ABC):
     """Abstract base class for all RAG pipelines."""
@@ -46,5 +46,5 @@ class Pipeline(ABC):
                 })
             else:
                 # This case should ideally not be hit if the list is homogeneous
-                logging.warning(f"Unexpected type in _format_nodes_to_docs: {type(node)}")
+                logger.warning(f"Unexpected type in _format_nodes_to_docs: {type(node)}")
         return formatted_docs

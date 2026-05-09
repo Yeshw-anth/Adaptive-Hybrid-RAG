@@ -1,4 +1,4 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any, Tuple
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -11,7 +11,6 @@ try:
 except nltk.downloader.DownloadError:
     nltk.download('punkt')
 
-logger = logging.getLogger(__name__)
 
 class SemanticSegmenter:
     """

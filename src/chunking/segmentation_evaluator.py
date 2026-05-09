@@ -1,9 +1,7 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Dict, Any, Literal
 from src.chunking.structure_segmenter import StructuralSegmenter
 from src.chunking.semantic_segmenter import SemanticSegmenter
-
-logger = logging.getLogger(__name__)
 
 class SegmentationEvaluator:
     """

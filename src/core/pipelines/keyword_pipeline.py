@@ -1,12 +1,10 @@
-import logging
+from src.core.logging_config import logger
 import time
 from typing import Dict, Any
 
 from src.core.pipelines.base import Pipeline
 from src.core.retrieval.keyword_retriever import KeywordRetriever
 from src.core.llm.ollama_client import OllamaClient
-
-logger = logging.getLogger(__name__)
 
 class KeywordPipeline(Pipeline):
     """
@@ -23,49 +21,63 @@ class KeywordPipeline(Pipeline):
         Executes the keyword-based RAG pipeline.
         """
         start_time = time.time()
-        logger.info(f"Executing KeywordPipeline for query: '{query}'")
+        strategy = query_analysis["strategy"]
+        logger.info(f"Executing KeywordPipeline for query: '{query}' with strategy: {strategy.name}")
 
-        # 1. Retrieve documents using keyword search
-        retrieved_docs = self.retriever.retrieve(query, top_k=5)
-        
-        if not retrieved_docs:
-            logger.warning("KeywordPipeline: No documents found for the query. Returning empty response.")
-            return {
-                "query": query,
-                "answer": "I could not find any information related to your query.",
-                "context": "",
-                "retrieved_docs": [],
-                "latency": time.time() - start_time,
-                "pipeline": "keyword",
-                "query_metadata": query_analysis.get("metadata", {}),
-                "strategy": query_analysis.get("strategy", {}),
-            }
+        # 1. Retrieval
+        retrieved_nodes = self.retriever.retrieve(query, top_k=strategy.top_k)
+        if not retrieved_nodes:
+            logger.warning("No nodes retrieved for the query.")
+            return self._generate_empty_response(query, start_time, query_analysis)
 
-        # Format context for the LLM
-        context_str = "\n\n".join(
-            [f"Source {i+1}: {doc['text']}" for i, doc in enumerate(retrieved_docs)]
-        )
+        # 2. Synthesis
+        response_text = await self._synthesize_response(query, retrieved_nodes, strategy)
 
-        # 2. Generate a response using the structured response generator
-        answer = await self.llm_client.generate_structured_response(
-            context=context_str,
+        # 3. Post-processing and Formatting
+        final_response = self._format_response(
             query=query,
-            model=query_analysis['strategy'].model
+            response_text=response_text,
+            retrieved_nodes=retrieved_nodes,
+            strategy=strategy,
+            start_time=start_time,
+            query_analysis=query_analysis
         )
+        
+        logger.info(f"KeywordPipeline execution finished in {final_response['latency']:.2f} seconds.")
+        return final_response
 
-        end_time = time.time()
-        latency = end_time - start_time
+    async def _synthesize_response(self, query: str, nodes: list, strategy: any) -> str:
+        """Synthesizes a response from the retrieved nodes."""
+        context = "\n\n".join([node['text'] for node in nodes])
+        
+        logger.debug(f"Synthesizing response with model: {strategy.model}")
+        return await self.llm_client.generate_structured_response(context=context, query=query, model=strategy.model)
 
-        result = {
-            "query": query,
-            "answer": answer,
-            "context": context_str,
-            "retrieved_docs": retrieved_docs,
+    def _format_response(self, **kwargs) -> Dict[str, Any]:
+        """Formats the final response dictionary."""
+        latency = time.time() - kwargs['start_time']
+        
+        response = {
+            "query": kwargs['query'],
+            "answer": kwargs['response_text'],
+            "context": "\n\n".join([node['text'] for node in kwargs['retrieved_nodes']]),
+            "retrieved_docs": kwargs['retrieved_nodes'],
             "latency": latency,
+            "pipeline": "keyword",
+            "query_metadata": kwargs['query_analysis'].get("metadata", {}),
+            "strategy": kwargs['strategy'],
+        }
+        return response
+
+    def _generate_empty_response(self, query: str, start_time: float, query_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Generates an empty response when no nodes are retrieved."""
+        return {
+            "query": query,
+            "answer": "Could not find relevant information using keywords.",
+            "context": "",
+            "retrieved_docs": [],
+            "latency": time.time() - start_time,
             "pipeline": "keyword",
             "query_metadata": query_analysis.get("metadata", {}),
             "strategy": query_analysis.get("strategy", {}),
         }
-        
-        logger.info(f"KeywordPipeline executed in {latency:.2f} seconds.")
-        return result

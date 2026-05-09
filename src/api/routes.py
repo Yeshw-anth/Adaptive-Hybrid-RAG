@@ -1,19 +1,18 @@
-import logging
+from src.core.logging_config import logger
 from fastapi import APIRouter, HTTPException, File, UploadFile, Request
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Set
 import asyncio
 import os
+from src.evaluation.ragas_evaluator import RagasEvaluator
 import shutil
 
 # Import the shared objects from settings.py
-from src.config import settings
+from src.config.settings import settings
 
 # Import other necessary components
 import hashlib
-from src.core.ingestion import IngestionRouter
-from src.chunking.chunking_engine import ChunkingEngine
-from src.chunking.metadata_enricher import MetadataEnricher
+from src.core.ingestion import IngestionPipeline
 
 
 # --- API Models ---
@@ -56,22 +55,25 @@ async def query_endpoint(request: Request, query_request: QueryRequest):
             strategy=result.get("pipeline") # Use the 'pipeline' key which holds the string name
         )
     except Exception as e:
-        logging.error(f"Error processing query: {e}", exc_info=True)
+        logger.error(f"Error processing query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error processing query.")
 
 @router.post("/upload")
 async def upload(request: Request, files: List[UploadFile] = File(...)):
     """Uploads and processes multiple files concurrently."""
-    vector_index = request.app.state.vector_index
-    chunking_engine = request.app.state.chunking_engine
+    ingestion_pipeline = request.app.state.ingestion_pipeline
 
-    if not all([vector_index, chunking_engine]):
+    if not ingestion_pipeline:
         raise HTTPException(status_code=503, detail="Core components are not initialized.")
 
-    upload_dir = settings.UPLOAD_DIR
-    os.makedirs(upload_dir, exist_ok=True)
+    graph_path = settings.GRAPH_PATH
+    temp_graph_path = graph_path.with_suffix('.temp.json')
 
-    metadata_enricher = MetadataEnricher()
+    # The check for graph existence has been removed to allow the IngestionPipeline
+    # to be the single source of truth for processing, which is crucial when
+    # the vector store is cleared on restart.
+
+    upload_dir = settings.UPLOAD_PATH
 
     async def process_file(file: UploadFile):
         file_path = os.path.join(upload_dir, file.filename)
@@ -81,29 +83,17 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
             with open(file_path, "wb") as buffer:
                 buffer.write(content)
 
-            # 1. Loader
-            loader = IngestionRouter.get_loader(file_path)
-            elements = loader.process()
-            if not elements:
-                return {"filename": file_name, "status": "skipped", "message": "No content extracted."}
+            # Use the IngestionPipeline to process the file
+            nodes = await ingestion_pipeline.ingest_file(file_path)
 
-            # 2. Chunking
-            nodes = await chunking_engine.chunk_document(elements, file_path=file_path)
+            if not nodes:
+                return {"filename": file_name, "status": "skipped", "message": "No content extracted or processed."}
 
-            # 3. Metadata Enrichment
-            enriched_nodes = metadata_enricher.enrich_nodes(nodes, file_name=file_name, file_path=file_path, section_title="General")
+            logger.info(f"Successfully ingested and processed {len(nodes)} nodes from '{file_name}'.")
             
-            # 4. Storage
-            vector_index.insert_nodes(enriched_nodes)
-            vector_index.storage_context.persist(persist_dir=settings.PERSIST_DIR)
-            
-            logging.info(f"Successfully indexed {len(enriched_nodes)} nodes from '{file_name}'.")
-            if enriched_nodes:
-                logging.info(f"Sample enriched metadata for {file_name}: {enriched_nodes[0].metadata}")
-
-            return {"filename": file_name, "status": "success", "node_count": len(enriched_nodes)}
+            return {"filename": file_name, "status": "success", "node_count": len(nodes)}
         except Exception as e:
-            logging.error(f"Error processing file {file_name} in batch: {e}", exc_info=True)
+            logger.error(f"Error processing file {file_name} in batch: {e}", exc_info=True)
             error_message = f"An internal error occurred: {str(e)}"
             return {"filename": file_name, "status": "failed", "error": error_message}
         finally:
@@ -113,8 +103,24 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
     tasks = [process_file(file) for file in files]
     results = await asyncio.gather(*tasks)
 
-    logging.info("Batch processing complete.")
+    logger.info("Batch processing complete.")
     return results
+
+@router.post("/evaluate")
+async def evaluate_logs():
+    """
+    Triggers a batch evaluation of the output logs using RAGas.
+    """
+    try:
+        logger.info("Received request to start RAGas batch evaluation.")
+        evaluator = RagasEvaluator()
+        result = evaluator.run_evaluation()
+        logger.info("RAGas batch evaluation completed successfully.")
+        return result
+    except Exception as e:
+        logger.error(f"Error during RAGas batch evaluation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred during evaluation: {str(e)}")
+
 
 # --- Feedback Endpoint (Future Scope) ---
 # class FeedbackRequest(BaseModel):
@@ -144,5 +150,5 @@ async def upload(request: Request, files: List[UploadFile] = File(...)):
 #         # This could happen if the query_id is not found
 #         raise HTTPException(status_code=404, detail=str(e))
 #     except Exception as e:
-#         logging.error(f"Error processing feedback: {e}", exc_info=True)
+#         logger.error(f"Error processing feedback: {e}", exc_info=True)
 #         raise HTTPException(status_code=500, detail="Error processing feedback.")

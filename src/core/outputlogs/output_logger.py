@@ -1,8 +1,8 @@
-import logging
+from src.core.logging_config import logger
 import json
 from datetime import datetime
 from src.data.schemas import OutputLog
-from src.config import settings
+from src.config.settings import settings
 
 class OutputLogger:
     """
@@ -27,4 +27,4 @@ class OutputLogger:
                 log_entry = output_log.model_dump_json()
                 f.write(log_entry + "\n")
         except Exception as e:
-            logging.error(f"Failed to write to output log: {e}")
+            logger.error(f"Failed to write to output log: {e}")

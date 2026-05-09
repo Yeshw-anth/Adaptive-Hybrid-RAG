@@ -11,6 +11,7 @@ class QueryMetadata(BaseModel):
     suggested_depth: int = Field(default=4)
     expected_answer_format: Literal["list", "single_value", "explanation", "code_snippet", "table"] = Field(default="explanation")
     content_hints: List[Literal["table", "code", "text", "graph"]] = Field(default_factory=list)
+    retrieval_strategy: Literal["vector", "graph", "hybrid", "hybrid_graph"] = Field(default="vector")
     max_latency: float | None = Field(default=None, description="Maximum allowed latency in seconds")
     max_cost: float | None = Field(default=None, description="Maximum allowed cost in USD")
 
@@ -46,6 +47,7 @@ class Document(BaseModel):
     score: float | None = Field(default=None, description="The relevance score of the document.")
 
 class OutputLog(BaseModel):
+    query_id: str
     query: str
     query_metadata: QueryMetadata
     selected_strategy: Strategy
@@ -59,3 +61,8 @@ class OutputLog(BaseModel):
     action_taken: str | None = None
     expansion_triggered: bool = False
     timestamp: str
+    # RAGas metrics
+    faithfulness: float | None = None
+    answer_relevancy: float | None = None
+    context_precision: float | None = None
+    context_recall: float | None = None

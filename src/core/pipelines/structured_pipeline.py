@@ -1,5 +1,5 @@
 import time
-import logging
+from src.core.logging_config import logger
 import pandas as pd
 import json
 from typing import Any, Dict, List
@@ -9,8 +9,6 @@ from src.core.llm.ollama_client import OllamaClient
 from src.core.retrieval.retriever import Retriever
 from src.core.decision.confidence_engine import ConfidenceEngine
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class StructuredPipeline(Pipeline):
     """

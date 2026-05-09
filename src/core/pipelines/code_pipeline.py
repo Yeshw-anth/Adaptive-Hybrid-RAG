@@ -1,13 +1,11 @@
 from typing import Any, Dict, List
-import logging
+from src.core.logging_config import logger
 from src.data.schemas import Document
 from src.core.pipelines.base import Pipeline
 from src.core.retrieval.hybrid_retriever import HybridRetriever
 from src.core.retrieval.cross_encoder import CrossEncoderReranker
 from llama_index.core.schema import NodeWithScore, TextNode
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 class CodePipeline(Pipeline):
     """
@@ -41,18 +39,20 @@ class CodePipeline(Pipeline):
         logger.info(f"Retrieved {len(retrieved_docs)} documents.")
 
         # 2. Reranking
-        if strategy.use_reranker and retrieved_docs: # Reranking is default for code
+        if strategy.use_reranker and retrieved_nodes: # Reranking is default for code
             logger.info("Step 2: Reranking documents.")
             reranked_nodes = self.reranker.rerank_nodes(query, retrieved_nodes)
             reranked_docs = self._format_nodes_to_docs(reranked_nodes)
             logger.info(f"Reranked down to {len(reranked_docs)} documents.")
         else:
             reranked_docs = retrieved_docs
+            reranked_nodes = retrieved_nodes # Keep nodes consistent
             logger.info("Step 2: Skipping reranker based on strategy.")
 
         return {
             "retrieved_docs": retrieved_docs,
-            "reranked_docs": reranked_docs
+            "reranked_docs": reranked_docs,
+            "final_docs": reranked_nodes # Pass nodes for orchestrator
         }
 
     def _format_nodes_to_docs(self, nodes: List[NodeWithScore]) -> List[Document]:

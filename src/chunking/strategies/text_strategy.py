@@ -1,13 +1,12 @@
-import logging
+from src.core.logging_config import logger
 from typing import List, Any
 from llama_index.core.schema import TextNode
 from llama_index.core.embeddings import BaseEmbedding
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.chunking.strategies.base_strategy import BaseChunkingStrategy
-from src.config import settings
+from src.config.settings import settings
 
-logger = logging.getLogger(__name__)
 
 class TextChunkingStrategy(BaseChunkingStrategy):
     """

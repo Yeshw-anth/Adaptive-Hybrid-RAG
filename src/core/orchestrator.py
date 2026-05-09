@@ -1,10 +1,10 @@
 import time
-import logging
+from src.core.logging_config import logger
 import uuid
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 
-from src.config import settings
+from src.config.settings import settings
 from src.core.strategy.query_analyzer import QueryAnalyzer
 from src.core.strategy.router import StrategyRouter
 from src.core.strategy.query_expander import QueryExpander
@@ -17,7 +17,6 @@ from src.core.caching.response_cache import ResponseCache
 from src.core.query_processor import QueryProcessor
 # from src.experimental.feedback.feedback_store import FeedbackStore
 
-logger = logging.getLogger(__name__)
 
 class RAGOrchestrator:
     """
@@ -71,8 +70,8 @@ class RAGOrchestrator:
             self.vector_index.insert_nodes(new_nodes)
             logger.info(f"Inserted {len(new_nodes)} new nodes into the vector index.")
             # Persist the changes to disk
-            self.vector_index.storage_context.persist(persist_dir=settings.PERSIST_DIR)
-            logger.info(f"Vector index persisted to {settings.PERSIST_DIR}")
+            self.vector_index.storage_context.persist(persist_dir=str(settings.VECTOR_STORE_PATH))
+            logger.info(f"Vector index persisted to {settings.VECTOR_STORE_PATH}")
         else:
             logger.error("Vector index is not available. Cannot insert new nodes.")
             return []
@@ -96,7 +95,7 @@ class RAGOrchestrator:
             all_nodes = list(self.vector_index.docstore.docs.values())
             if self.keyword_retriever:
                 # The KeywordRetriever uses a 'set_nodes' method
-                self.keyword_retriever.set_nodes(all_nodes)
+                self.keyword_retriever.update_corpus([node.get_content() for node in all_nodes])
                 logger.info(f"Updated KeywordRetriever with {len(all_nodes)} nodes.")
             if self.hybrid_retriever:
                 self.hybrid_retriever.update_corpus(all_nodes)
@@ -110,23 +109,24 @@ class RAGOrchestrator:
         analyzes it, selects a strategy, and executes the corresponding pipeline.
         """
         start_time = time.time()
-        query_id = f"query_{int(start_time)}"
-        logger.info(f"--- Orchestrating query: '{original_query}' (ID: {query_id}) ---")
+        query_id = f"query_{uuid.uuid4()}"
+        bound_logger = logger.bind(query_id=query_id)
+        bound_logger.info(f"--- Orchestrating query: '{original_query}' ---")
 
         # --- Step 0: Preprocess the query ---
         normalized_query = self.query_processor.normalize(original_query)
         keyword_tokens = self.query_processor.clean_for_keywords(original_query)
-        logger.info(f"Normalized query for semantic search: '{normalized_query}'")
-        logger.info(f"Cleaned tokens for keyword search: {keyword_tokens}")
+        bound_logger.info(f"Normalized query for semantic search: '{normalized_query}'")
+        bound_logger.info(f"Cleaned tokens for keyword search: {keyword_tokens}")
 
         try:
             # We use the normalized query for semantic analysis and strategy selection
             query_metadata, strategy = await self._analyze_and_select_strategy(
-                normalized_query, keyword_tokens, model_override
+                normalized_query, keyword_tokens, model_override, query_id, bound_logger
             )
 
         except Exception as e:
-            logger.warning(f"Query analysis failed: {e}. Falling back to default 'accurate' strategy.", exc_info=True)
+            bound_logger.warning(f"Query analysis failed: {e}. Falling back to default 'accurate' strategy.", exc_info=True)
             query_metadata = QueryMetadata(
                 intent="fact-seeking",
                 complexity="high",
@@ -140,34 +140,47 @@ class RAGOrchestrator:
 
         try:
             # The pipeline will receive the original query and the processed versions within the metadata
-            pipeline_result = await self._execute_pipeline(original_query, strategy, query_metadata)
-            self._log_output(query_id, original_query, pipeline_result)
+            pipeline_result = await self._execute_pipeline(original_query, strategy, query_metadata, query_id, bound_logger)
+            pipeline_result['query_metadata'] = query_metadata
+            pipeline_result['strategy'] = strategy
+
+            # --- Step 3: Finalize and Log ---
+            end_time = time.time()
+            latency = end_time - start_time
+            pipeline_result['latency'] = latency
+            
+            bound_logger.info(f"Query orchestration completed in {latency:.2f} seconds.")
+            
+            self._log_output(query_id, original_query, pipeline_result, bound_logger)
             
             return pipeline_result
         except Exception as e:
-            logger.error(f"Error during pipeline execution for ID {query_id}: {e}", exc_info=True)
-            return {"error": str(e), "status": "failed", "query_id": query_id}
+            bound_logger.error(f"Error during pipeline execution: {e}", exc_info=True)
+            end_time = time.time()
+            latency = end_time - start_time
+            bound_logger.info(f"Query orchestration failed in {latency:.2f} seconds.")
+            return {"error": str(e), "status": "failed", "query_id": query_id, "latency": latency}
 
-    async def _analyze_and_select_strategy(self, normalized_query: str, keyword_tokens: List[str], model_override: str | None = None) -> Tuple[QueryMetadata, "Strategy"]:
+    async def _analyze_and_select_strategy(self, normalized_query: str, keyword_tokens: List[str], model_override: str | None = None, query_id: str = "unknown", bound_logger=logger) -> Tuple[QueryMetadata, "Strategy"]:
         """Analyzes the query and selects the appropriate RAG strategy."""
-        logger.info("Step 1: Analyzing query and selecting strategy.")
+        bound_logger.info(f"Step 1: Analyzing query and selecting strategy.")
         query_metadata = await self.query_analyzer.analyze(
             normalized_query=normalized_query,
             keyword_tokens=keyword_tokens,
             model_override=model_override
         )
         strategy = self.strategy_router.select_strategy(query_metadata,model_override=model_override)
-        logger.info(f"Strategy selected: {strategy.pipeline}")
+        bound_logger.info(f"Strategy selected: {strategy.pipeline}")
         return query_metadata, strategy
 
-    async def _execute_pipeline(self, query: str, strategy: Strategy, query_metadata: QueryMetadata) -> Dict[str, Any]:
+    async def _execute_pipeline(self, query: str, strategy: Strategy, query_metadata: QueryMetadata, query_id: str, bound_logger) -> Dict[str, Any]:
         """Executes the selected pipeline with the given query and strategy."""
-        logger.info(f"Step 2: Executing pipeline: {strategy.pipeline}")
+        bound_logger.info(f"Step 2: Executing pipeline: {strategy.pipeline}")
         
         pipeline_name = strategy.pipeline
         selected_pipeline = self.pipelines.get(pipeline_name)
         if not selected_pipeline:
-            logger.error(f"Pipeline '{pipeline_name}' not found.")
+            bound_logger.error(f"Pipeline '{pipeline_name}' not found.")
             raise ValueError(f"Pipeline '{pipeline_name}' not found.")
 
         # The pipeline will receive a dictionary with 'metadata' and 'strategy' keys.
@@ -183,7 +196,7 @@ class RAGOrchestrator:
         
         # Post-processing for pipelines that only retrieve documents (like CodePipeline)
         if 'answer' not in pipeline_result and 'reranked_docs' in pipeline_result:
-            logger.info("Pipeline returned documents. Generating final answer.")
+            bound_logger.info("Pipeline returned documents. Generating final answer.")
             
             context_docs = pipeline_result['reranked_docs']
             context_str = "\n\n".join(
@@ -201,16 +214,31 @@ class RAGOrchestrator:
         # Ensure metadata and strategy are in the final result for logging
         pipeline_result['query_metadata'] = query_metadata
         pipeline_result['strategy'] = strategy
+        pipeline_result['query_id'] = query_id
         
         return pipeline_result
 
-    def _log_output(self, query_id: str, query: str, result: Dict):
+
+
+    def _log_output(self, query_id: str, query: str, result: Dict, bound_logger=logger):
         """
-        Logs the result of a query for later evaluation using the FeedbackStore.
-        This method is defensive and uses .get() to avoid KeyErrors
-        and aligns with the OutputLog Pydantic schema.
+        Logs the result of a query for later evaluation.
+        This method is defensive, uses .get() to avoid KeyErrors, and aligns
+        with the OutputLog Pydantic schema. It also avoids logging empty or
+        non-committal answers to keep the evaluation data clean.
         """
         try:
+            final_answer = result.get("answer", "").strip().lower()
+            
+            # Define what constitutes a non-answer to avoid logging for evaluation
+            non_answers = [
+                "could not find any relevant information."
+            ]
+
+            if not final_answer or any(non_answer in final_answer.lower() for non_answer in non_answers):
+                bound_logger.warning(f"Skipping logging for query_id {query_id} due to non-substantive answer.")
+                return
+
             # The pipeline result might contain a 'confidence' dictionary (from accurate_pipeline)
             # or a flat 'confidence_score' (from fast_pipeline). This handles both cases.
             confidence_info = result.get("confidence", {})
@@ -225,6 +253,7 @@ class RAGOrchestrator:
             strategy_obj = result.get("strategy")
 
             log_entry = OutputLog(
+                query_id=query_id,
                 query=query,
                 query_metadata=query_metadata_obj if query_metadata_obj else {},
                 selected_strategy=strategy_obj if strategy_obj else {},
@@ -237,11 +266,16 @@ class RAGOrchestrator:
                 confidence_score=confidence_score,
                 action_taken=action_taken,
                 expansion_triggered=result.get("expansion_details", {}).get("expanded", False),
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.now().isoformat(),
+                faithfulness=result.get('faithfulness'),
+                answer_relevancy=result.get('answer_relevancy'),
+                context_precision=result.get('context_precision'),
+                context_recall=result.get('context_recall')
             )
             # Use the FeedbackStore to log the evaluation - Temporarily disabled
             # self.feedback_store.log_feedback(query_id=query_id, evaluation=log_entry.model_dump())
             self.output_logger.log(log_entry)
+            bound_logger.info(f"Final output logged successfully.")
         except Exception as e:
             # This will catch PydanticValidationErrors and other issues
-            logger.error(f"Failed to create or log outputlogs data for query_id {query_id}: {e}", exc_info=True)
+            bound_logger.error(f"Failed to create or log outputlogs data for query_id {query_id}: {e}", exc_info=True)

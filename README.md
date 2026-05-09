@@ -8,13 +8,17 @@ This is not just a simple RAG pipeline; it is a sophisticated orchestration engi
 
 The system is designed around a sophisticated orchestration engine that manages the entire lifecycle of a query, from initial ingestion to final response generation.
 
-1.  **Tiered Ingestion Pipeline**: Documents are processed through a multi-stage pipeline that extracts content based on its structure. It uses a 3-tier fallback system for PDFs (PyMuPDF's advanced layout-aware extraction, then a simple text extraction, and finally OCR for scanned images), ensuring maximum data recovery.
-2.  **Adaptive Chunking**: The `ChunkingEngine` intelligently selects the best chunking strategy based on content type (text, code, tables, images), preserving the semantic integrity of the data.
-3.  **Query Preprocessing**: Before retrieval, every user query is passed through a `QueryProcessor`. It creates two versions: a minimally processed version for semantic vector search and a heavily cleaned version (stopwords removed, etc.) for precise keyword search.
-4.  **Dynamic Strategy Selection**: The `RAGOrchestrator` analyzes the preprocessed query to understand its intent and complexity, then selects the optimal retrieval pipeline (e.g., simple vector search, hybrid search with reranking).
-5.  **Hybrid Retrieval & Synthesis**: The selected pipeline fetches relevant data chunks using a combination of semantic and keyword search, re-ranks them for relevance, and then synthesizes a final, coherent answer using a Large Language Model.
+1.  **Content-Aware Ingestion**: Documents are processed by a `ChunkingEngine` that uses content-aware strategies (e.g., for text, code, tables) to preserve semantic integrity.
+2.  **Dual-Path Data Storage**: The ingestion pipeline creates two distinct data representations for retrieval:
+    - **Vector Embeddings**: Content chunks are converted into vector embeddings and stored in a **Vector Store** for efficient semantic search.
+    - **Knowledge Graph**: A `GraphBuilder` uses a hybrid strategy (rule-based and LLM) to extract knowledge triples from the text, which are stored in a **Neo4j Knowledge Graph**.
+3.  **Intelligent Query Analysis**: Every user query is passed through a `QueryAnalyzer`. It determines the query's intent, complexity, and required content types to select the optimal retrieval strategy.
+4.  **Dynamic Pipeline Execution**: Based on the analysis, the system dispatches the query to one of several specialized RAG pipelines:
+    - A **Vector/Hybrid Pipeline** for semantic or keyword-based searches.
+    - A **Graph Pipeline** that leverages the knowledge graph for complex, relational questions.
+5.  **Synthesized Response Generation**: The selected pipeline retrieves the most relevant context from its corresponding data store, which is then used by a Large Language Model to synthesize a final, accurate answer.
 
-![System Architecture](assets/architecture.png)
+![System Architecture](assets/architecture_new.png)
 
 ## Core Features
 
@@ -24,23 +28,26 @@ The system is designed around a sophisticated orchestration engine that manages 
   - **Code**: Employs `Tree-sitter` for syntax-aware chunking, keeping logical code blocks (functions, classes) intact.
   - **Images**: Utilizes a multi-modal Vision-Language Model (VLM) to generate detailed captions, making visual information searchable.
   - **Tables**: Processes tables as structured data to preserve their tabular context.
-- **Dual-Mode Query Processor**: A dedicated `QueryProcessor` standardizes every incoming query for the hybrid retrieval system. It generates a `normalized` version for semantic search and a `cleaned` token list for keyword search, improving retrieval accuracy.
-- **Dynamic Strategy Router**: The "brain" of the system. It analyzes each user query to determine its intent, complexity, and required content types, then dynamically selects the most effective retrieval pipeline.
+- **Advanced Query Analyzer**: A sophisticated `QueryAnalyzer` that determines the query's intent, complexity, and required content types, then dynamically selects the most effective retrieval pipeline.
 - **Multiple Retrieval Pipelines**: 
   - **Fast Pipeline**: For simple queries, using a quick vector search.
   - **Accurate Pipeline**: For complex questions, using hybrid search (vector + keyword) and a Cross-Encoder reranker for maximum relevance.
   - **Specialized Pipelines**: Dedicated routes for `code`, `keyword`, and `structured` (table) queries.
+- **Knowledge Graph & Graph-Native Reasoning**: Enables complex, multi-hop reasoning impossible for standard vector search.
+  - **Hybrid Triple Extraction**: Combines fast, high-precision grammatical extraction using `spaCy` with a flexible LLM-based fallback to maximize both speed and recall.
+  - **Two-Tiered Graph Retrieval**: First attempts to translate questions directly into a Cypher query for deep reasoning. If that fails, it falls back to a robust entity-based subgraph retrieval to ensure a relevant answer is always found.
 - **Full Observability**: Detailed logging for every stage, from ingestion to final response generation, enabling easy debugging and performance analysis.
 
 ## What We Achieved
 
-This project successfully evolved from a basic RAG prototype into a robust, production-ready system. Key achievements include:
+This project successfully evolved from a basic RAG prototype into a robust, production-ready system capable of advanced reasoning. Key achievements include:
 
-1.  **Robust PDF & Query Handling**: We implemented a tiered PDF ingestion system that gracefully handles complex documents and a query processor that optimizes user input for hybrid search.
-2.  **Eliminated Over-Engineering**: We systematically removed complex, unnecessary components (like the `SemanticSplitter` and `Adjudicator`) in favor of a more direct and powerful architecture.
-3.  **Unified Ingestion Pipeline**: We replaced a clunky, manual system of individual file loaders with a single, elegant `ChunkingEngine` powered by `unstructured` and a factory of specialized chunking strategies.
-4.  **Intelligent Content-Aware Processing**: The system no longer treats all content as plain text. It understands the difference between prose, code, tables, and images, and processes each accordingly.
-5.  **Pragmatic, Production-Focused Design**: Every architectural decision was made with a focus on real-world performance, scalability, and maintainability.
+1.  **Implemented a True Hybrid RAG System**: We went beyond simple vector search by integrating a Knowledge Graph, allowing the system to handle both semantic and relational queries.
+2.  **Built a Sophisticated, Two-Tiered Graph Retrieval Engine**: The system can translate natural language into formal Cypher queries for deep, multi-hop reasoning, with a robust entity-based fallback to ensure high availability.
+3.  **Developed an Intelligent Query Analyzer**: Instead of using a single, static RAG chain, the system dynamically analyzes each query and routes it to the optimal pipeline (Vector, Hybrid, or Graph), maximizing both accuracy and efficiency.
+4.  **Created a Content-Aware Ingestion Pipeline**: The `ChunkingEngine` uses specialized strategies for different content types (prose, code, tables), preserving the semantic integrity of the source documents.
+5.  **Pragmatic, Production-Focused Design**: Every architectural decision was made with a focus on real-world performance, scalability, and maintainability, resulting in a clean, well-tested, and documented codebase.
+6.  **Established Quantitative Evaluation with Ragas**: We integrated the `ragas` framework to quantitatively measure the performance of our RAG pipeline, providing a clear, data-driven view of the system's accuracy.
 
 ## Setup and Installation
 
@@ -64,16 +71,30 @@ This project successfully evolved from a basic RAG prototype into a robust, prod
     pip install -r requirements.txt
     ```
 
-4.  **Build Code Parsing Grammars:**
+4.  **Set Up Environment Variables:**
+    The evaluation process now uses the Google Gemini API. You will need to provide your API key in an environment variable.
+
+    Create a file named `.env` in the root of the project and add your API key:
+    ```
+    GOOGLE_API_KEY="your_google_api_key_here"
+    ```
+
+5.  **Build Code Parsing Grammars:**
     This one-time step compiles the `tree-sitter` grammars needed for intelligent code chunking.
     ```bash
     python treesitter_build/build_grammars.py
     ```
 
-5.  **(Optional) Download NLTK Stopwords for Enhanced Keyword Search:**
+6.  **(Optional) Download NLTK Stopwords for Enhanced Keyword Search:**
     For the best keyword cleaning performance, download the NLTK stopwords list. The system will function without this, but it will use a more basic list of stopwords.
     ```bash
     python -m nltk.downloader stopwords
+    ```
+
+7.  **Download SpaCy Model for Grammatical Analysis:**
+    The system uses spaCy's `en_core_web_sm` model for high-precision, rule-based triple extraction from text. This is a required dependency for the knowledge graph feature.
+    ```bash
+    python -m spacy download en_core_web_sm
     ```
 
 ## How to Use the System
@@ -84,7 +105,7 @@ This command starts the main application. For development, it's recommended to u
 
 **For development (with auto-reload):**
 ```bash
-uvicorn main:app --reload --port 8001
+uvicorn main:app --reload --port 8000
 ```
 
 **For simple execution:**
@@ -92,7 +113,7 @@ uvicorn main:app --reload --port 8001
 python main.py
 ```
 
-The server will be running at `http://127.0.0.1:8001`.
+The server will be running at `http://127.0.0.1:8000`.
 
 ### 2. Run the Streamlit UI
 
@@ -123,6 +144,31 @@ For each response, the system provides the source chunks it used for generation 
 *Sources and confidence score for a response*
 ![Sources and Confidence](assets/sources_and_confidence.png)
 
+## Evaluation
+
+We have integrated the `ragas` framework to provide a quantitative evaluation of the RAG pipeline's performance. This allows us to measure the quality of the generated answers against a ground-truth dataset.
+
+### Metrics
+
+The evaluation measures the following key metrics:
+
+- **Faithfulness**: Measures how factually consistent the generated answer is with the retrieved context.
+- **Answer Relevancy**: Assesses how relevant the generated answer is to the original question.
+- **Context Precision**: Evaluates whether the retrieved context was relevant and useful for answering the question.
+- **Context Recall**: Measures the system's ability to retrieve all the necessary information to answer the question.
+
+### Running the Evaluation
+
+To run the evaluation, you first need a ground-truth dataset. This is a JSON file located at `src/evaluation/evaluation_dataset.json`. It contains a list of questions and their corresponding ideal answers.
+
+Once the dataset is prepared, you can run the evaluation script:
+
+```bash
+python -m src.evaluation.ragas_evaluator
+```
+
+The script will run the evaluation and print the average scores for each metric.
+
 ## Configuration
 
 Key settings can be modified in `src/config/settings.py`:
@@ -132,16 +178,15 @@ Key settings can be modified in `src/config/settings.py`:
   - `"manual"`: The legacy pipeline with individual file loaders. Useful for benchmarking.
 - `CHUNK_SIZE` / `CHUNK_OVERLAP`: Control the size and overlap of text chunks.
 - `EMBED_MODEL_NAME`: Specify the embedding model to use.
+- `GOOGLE_MODEL_NAME`: The name of the Google Gemini model to use for the evaluation LLM.
 - `CLEAR_ON_RESTART`: Set to `True` during development to clear the vector store on each server start.
 
 ## Future Scope
 
 This project provides a powerful foundation that can be extended in many ways:
-
-- **Knowledge Graph Integration**: Augment the vector store with a knowledge graph to enable more complex, multi-hop reasoning.
-- **Agent-Based Workflows**: Develop autonomous agents that can use the RAG system as a tool to perform research, analysis, and report generation.
+- **Self-Correcting RAG with Feedback Loops**: Implement a "critique" step where the system evaluates its own generated answer against the source documents. If the answer is weakly supported, the system can automatically re-run the retrieval process with a refined query to improve accuracy.
+- **Agentic Workflows for Complex Tasks**: Develop autonomous agents that use the RAG system as a tool to perform complex, multi-step tasks like generating summary reports, comparing documents, or monitoring information streams.
 - **Advanced Evaluation Suite**: Expand the evaluation framework to continuously measure performance on metrics like answer relevance, faithfulness, and latency.
-- **UI Enhancements**: Build a more advanced user interface (e.g., using the included `st_app.py` Streamlit app) to visualize retrieval steps and allow for interactive feedback.
 
 ## Project Structure
 
@@ -151,24 +196,23 @@ auto-adaptive-hybrid-rag/
  src/
     api/                  # FastAPI endpoints
     chunking/             # Adaptive chunking logic
-      strategies/       # Strategies for different content types (text, code, image)
+      strategies/       # Strategies for different content types
     config/               # Configuration settings
     core/                 # Core orchestration and system logic
        decision/         # Decision engine for routing
+       graph/            # Knowledge graph construction and retrieval
        llm/              # Language model wrappers
        pipelines/        # RAG pipelines (fast, accurate, etc.)
-       retrieval/        # Retrieval and reranking logic
+       retrieval/        # Vector/hybrid retrieval and reranking logic
        strategy/         # Query analysis and strategy selection
-      query_processor.py  # Query normalization and cleaning
-    data/                 # Data schemas and models
-      ingestion/        # Document loading and parsing
+    data/                 # Pydantic data schemas and models
     evaluation/           # Evaluation scripts and datasets
-   experimental/         # Experimental features
+    experimental/         # Experimental features
 
  tests/                    # Test suite
  assets/                   # Images and other static assets
  main.py                   # FastAPI application entry point
  st_app.py                 # Streamlit UI application
  README.md                 # Project documentation
-requirements.txt          # Python dependencies
+ requirements.txt          # Python dependencies
 ```

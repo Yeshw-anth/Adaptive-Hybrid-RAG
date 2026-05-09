@@ -1,12 +1,10 @@
 # src/core/caching/response_cache.py
-import logging
+from src.core.logging_config import logger
 from typing import List, Optional, Dict, Any
 from diskcache import Cache
 import hashlib
 
-from src.config import settings
-
-logger = logging.getLogger(__name__)
+from src.config.settings import settings
 
 class ResponseCache:
     """
@@ -18,7 +16,7 @@ class ResponseCache:
     will not return a stale answer.
     """
 
-    def __init__(self, cache_dir: str = settings.CACHE_DIR, ttl: int = 3600 * 24 * 7):
+    def __init__(self, cache_dir: str = settings.CACHE_PATH, ttl: int = 3600 * 24 * 7):
         """
         Initializes the response cache.
 

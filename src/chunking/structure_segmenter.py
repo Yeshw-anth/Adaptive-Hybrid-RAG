@@ -1,11 +1,10 @@
-import logging
+from src.core.logging_config import logger
 import re
 from typing import List, Dict, Any
 from unstructured.chunking.title import chunk_by_title
-from unstructured.documents.elements import Element, CompositeElement
+from unstructured.documents.elements import Element, CompositeElement, Text
 from src.data.embedding.embedder import Embedder
 
-logger = logging.getLogger(__name__)
 
 class StructuralSegmenter:
     """
@@ -28,27 +27,47 @@ class StructuralSegmenter:
         """
         logger.info(f"Attempting structural segmentation with `chunk_by_title` on {len(elements)} elements.")
         try:
-            # chunk_by_title returns CompositeElement objects which contain the original elements
             chunks = chunk_by_title(elements, max_characters=2048, combine_text_under_n_chars=128)
             
             initial_sections = []
             for chunk in chunks:
-                # Extract title from metadata if available
-                if hasattr(chunk, 'metadata'):
-                    metadata_dict = chunk.metadata.to_dict()
-                    title = metadata_dict.get('title', 'Untitled Section')
+                if isinstance(chunk, CompositeElement):
+                    section_elements = chunk.metadata.orig_elements
+                else:
+                    section_elements = [chunk]
                 
-                # The chunk itself is a CompositeElement containing original elements
-                section_elements = chunk.to_dict().get('elements', [])
-                
+                title = "Untitled Section"
+                if section_elements:
+                    try:
+                        # Safely access the title attribute.
+                        title = section_elements[0].metadata.title
+                    except AttributeError:
+                        # If the title attribute doesn't exist, keep the default.
+                        pass
+
                 initial_sections.append({"title": title, "elements": section_elements})
 
             refined_sections = self._validate_and_refine_sections(initial_sections)
-            logger.info(f"Structural segmentation complete. Found {len(refined_sections)} refined sections.")
-            return refined_sections
+            
+            final_output = []
+            for section in refined_sections:
+                elements_as_dicts = []
+                for el in section["elements"]:
+                    element_dict = el.to_dict()
+                    if 'metadata' in element_dict and 'coordinates' in element_dict['metadata']:
+                        del element_dict['metadata']['coordinates']
+                    elements_as_dicts.append(element_dict)
+                
+                final_output.append({
+                    "title": section["title"],
+                    "elements": elements_as_dicts
+                })
+            
+            logger.info(f"Structural segmentation complete. Found {len(final_output)} refined sections.")
+            return final_output
 
         except Exception as e:
-            logger.error(f"An error occurred during `chunk_by_title`: {e}", exc_info=True)
+            logger.error(f"An error occurred during structural segmentation: {e}", exc_info=True)
             return []
 
     def _validate_and_refine_sections(self, sections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -79,7 +98,7 @@ class StructuralSegmenter:
                 section_text = "\n\n".join([el.text for el in section['elements']])
                 if len(section_text) < 150:
                     # Prepend the title of the short section to its elements before merging
-                    title_element = Element(text=f"\n\n--- {section['title']} ---\n\n")
+                    title_element = Text(text=f"\n\n--- {section['title']} ---\n\n")
                     balanced_sections[-1]['elements'].append(title_element)
                     balanced_sections[-1]['elements'].extend(section['elements'])
                 else:
@@ -96,7 +115,8 @@ class StructuralSegmenter:
                 continue
 
             try:
-                title_embedding, content_embedding = self.embedder.get_text_embedding_batch([title, content])
+                title_embedding = self.embedder.get_text_embedding(title)
+                content_embedding = self.embedder.get_text_embedding(content)
                 similarity = self.embedder.similarity(title_embedding, content_embedding)
                 
                 if similarity < 0.4:
